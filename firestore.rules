@@ -1,0 +1,54 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: savedAnalyses
+    // Document ID: auto-generated
+    // Fields:
+    //   - userId: string (required) - UID of the owner
+    //   - game: string (required) - Name of the game
+    //   - date: string (required) - ISO date of analysis
+    //   - analysis: map (required) - Full analysis data
+    //   - status: string (required) - 'pending', 'hit', 'miss', 'void'
+    //   - createdAt: timestamp (required) - Creation time
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidAnalysis(data) {
+      return data.userId is string &&
+             data.game is string && data.game.size() > 0 && data.game.size() < 200 &&
+             data.date is string &&
+             (data.analysis is map || data.multiAnalysis is map) &&
+             data.status in ['pending', 'hit', 'miss', 'void'] &&
+             data.createdAt is timestamp;
+    }
+
+    match /savedAnalyses/{analysisId} {
+      allow read: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid);
+      allow create: if isAuthenticated() && 
+                      request.resource.data.userId == request.auth.uid &&
+                      isValidAnalysis(request.resource.data);
+      allow update: if isAuthenticated() && 
+                      resource.data.userId == request.auth.uid &&
+                      request.resource.data.userId == request.auth.uid &&
+                      isValidAnalysis(request.resource.data);
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+    }
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "entities": {
+    "SavedAnalysis": {
+      "title": "Saved Analysis",
+      "description": "An analysis saved by the user for tracking performance.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "The UID of the user who saved the analysis."
+        },
+        "game": {
+          "type": "string",
+          "description": "The name of the game analyzed."
+        },
+        "date": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The date and time the analysis was performed."
+        },
+        "analysis": {
+          "type": "object",
+          "description": "The full analysis result from the AI."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "hit", "miss", "void"],
+          "description": "The outcome of the analysis."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the analysis was saved."
+        }
+      },
+      "required": ["userId", "game", "date", "analysis", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/savedAnalyses/{analysisId}": {
+      "schema": "SavedAnalysis",
+      "description": "Collection of saved football analyses."
+    }
+  }
+}
