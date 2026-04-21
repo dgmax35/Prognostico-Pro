@@ -15,6 +15,7 @@ import {
   BarChart3, 
   Calendar,
   ChevronRight,
+  Users,
   Loader2,
   Info,
   History,
@@ -25,7 +26,12 @@ import {
   XCircle,
   Clock,
   Trash2,
-  RefreshCw
+  RefreshCw,
+  Table,
+  Calculator,
+  Plus,
+  Bot,
+  Smile
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { auth, db, googleProvider } from './firebase';
@@ -117,6 +123,58 @@ const getDynamicDates = () => {
   };
 };
 
+const validateGameDates = (data: any, type: 'single' | 'multi' | 'leverage'): boolean => {
+  const { today, tomorrow, currentYear } = getDynamicDates();
+  const currentYearStr = currentYear.toString();
+  
+  try {
+    if (type === 'single' || type === 'leverage') {
+      const gameDate = data.data; 
+      if (!gameDate) return false;
+      if (!gameDate.includes(currentYearStr)) return false;
+      return gameDate.includes(today) || gameDate.includes(tomorrow);
+    }
+    
+    if (type === 'multi') {
+      if (!data.jogos || !Array.isArray(data.jogos)) return false;
+      return data.jogos.every((j: any) => {
+        if (!j.data) return false;
+        if (!j.data.includes(currentYearStr)) return false;
+        return j.data.includes(today) || j.data.includes(tomorrow);
+      });
+    }
+  } catch (e) {
+    return false;
+  }
+  return true;
+};
+
+// Helper to safely parse JSON from AI response
+const safeJsonParse = (text: string) => {
+  try {
+    // Clean potential markdown or extra text
+    let cleaned = text.trim();
+    if (cleaned.startsWith('```json')) {
+      cleaned = cleaned.replace(/^```json\n?/, '').replace(/\n?```$/, '');
+    } else if (cleaned.startsWith('```')) {
+      cleaned = cleaned.replace(/^```\n?/, '').replace(/\n?```$/, '');
+    }
+    
+    // Find the first { and the last }
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    
+    if (firstBrace !== -1 && lastBrace !== -1) {
+      cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+    }
+    
+    return JSON.parse(cleaned);
+  } catch (e) {
+    console.error("JSON Parse Error:", e, "Original text:", text);
+    throw new Error("Falha ao processar os dados da análise. Tente novamente.");
+  }
+};
+
 // Types for the analysis response
 interface AnalysisResult {
   confronto: string;
@@ -126,12 +184,23 @@ interface AnalysisResult {
     estiloEquipes: string;
     tendencia: string;
     expectativa: string;
+    caracteristicaJogo: string;
+    arbitro: {
+      nome: string;
+      caracteristicas: string;
+    };
   };
   estatisticas: {
     golsMedios: string;
     overUnder: string;
     btts: string;
     escanteios: string;
+    escanteiosHT: string;
+    golsHT: string;
+    finalizacoes: string;
+    chutesTotal: string;
+    chutesAoGol: string;
+    defesasGoleiro: string;
     cartoes: string;
     formaRecente: string;
   };
@@ -149,6 +218,11 @@ interface AnalysisResult {
       justificativa: string;
     };
   };
+  apostaPersonalizada: {
+    selecoes: string[];
+    oddTotal: string;
+    justificativa: string;
+  };
   alavancagemJogo: {
     entrada: string;
     justificativa: string;
@@ -160,6 +234,34 @@ interface AnalysisResult {
   };
   gestaoRisco: 'segura' | 'moderada' | 'agressiva';
   confianca: string;
+  mercadosElite?: {
+    mercado: string;
+    tendencia: 'Alta Tendência' | 'Baixa Tendência';
+    prognostico: string;
+    estatistica: string;
+  }[];
+  basquete?: {
+      jogadores: {
+        nome: string;
+        pontos: string;
+        rebotes: string;
+        assistencias: string;
+        cestas3: string;
+        duploDuplo: string;
+        triploDuplo: string;
+      }[];
+      pontuacaoTimes: string;
+      pontosQuartos: {
+        q1: string;
+        q2: string;
+        q3: string;
+        q4: string;
+      };
+      pontosTempo: {
+        t1: string;
+        t2: string;
+      };
+    };
 }
 
 interface SavedAnalysis {
@@ -171,10 +273,12 @@ interface SavedAnalysis {
   multiAnalysis?: MultiBetResult;
   type: 'single' | 'multi';
   status: 'pending' | 'hit' | 'miss' | 'void';
+  postGameAnalysis?: string;
   entryStatuses?: {
     principal?: 'pending' | 'hit' | 'miss' | 'void';
     segura?: 'pending' | 'hit' | 'miss' | 'void';
     alavancagem?: 'pending' | 'hit' | 'miss' | 'void';
+    apostaPersonalizada?: 'pending' | 'hit' | 'miss' | 'void';
     multi?: ('pending' | 'hit' | 'miss' | 'void')[];
   };
   createdAt: any;
@@ -189,11 +293,33 @@ interface MultiBetResult {
     entrada: string;
     odd: string;
     justificativaCurta: string;
+    fonteVerificacao: string;
     mercado: string;
   }[];
   oddTotal: string;
   analiseGeral: string;
   confianca: string;
+}
+
+interface LeverageResult {
+  confronto: string;
+  liga: string;
+  data: string;
+  horario: string;
+  entrada: string;
+  odd: string;
+  justificativa: string;
+  confianca: string;
+}
+
+interface SpreadsheetEntry {
+  id: string;
+  date: string;
+  game: string;
+  odd: number;
+  stake: number;
+  status: 'hit' | 'miss' | 'pending' | 'void';
+  profit: number;
 }
 
 // Error Boundary Component
@@ -253,19 +379,68 @@ class ErrorBoundary extends (React.Component as any) {
   }
 }
 
+const RobotAdvisor = ({ message, active }: { message: string, active: boolean }) => (
+  <AnimatePresence>
+    {active && (
+      <motion.div
+        initial={{ opacity: 0, scale: 0.8, y: 20 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.8, y: 20 }}
+        className="fixed bottom-8 right-8 z-[100] flex flex-col items-end gap-3 pointer-events-none"
+      >
+        <motion.div 
+          initial={{ opacity: 0, x: 20 }}
+          animate={{ opacity: 1, x: 0 }}
+          className="bg-emerald-500 text-black p-5 rounded-[2rem] rounded-br-none shadow-2xl max-w-[280px] text-sm font-black border-2 border-white/20 relative pointer-events-auto"
+        >
+          <div className="absolute -bottom-2 right-0 w-4 h-4 bg-emerald-500 rotate-45" />
+          <div className="flex items-start gap-3">
+            <span className="shrink-0 text-2xl font-bold">🤖</span>
+            <p className="leading-tight">{message}</p>
+          </div>
+        </motion.div>
+        <div className="w-20 h-20 bg-emerald-500 rounded-full flex items-center justify-center shadow-xl border-4 border-white/20 relative pointer-events-auto hover:scale-110 transition-transform group cursor-pointer overflow-hidden">
+          <div className="absolute inset-0 bg-gradient-to-tr from-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+          <motion.div
+            animate={{ 
+              rotate: [0, -10, 10, -10, 0],
+              y: [0, -5, 0, -5, 0]
+            }}
+            transition={{ repeat: Infinity, duration: 4 }}
+          >
+            <Bot className="w-12 h-12 text-black" />
+          </motion.div>
+          <motion.div 
+            animate={{ scale: [1, 1.2, 1] }}
+            transition={{ repeat: Infinity, duration: 2 }}
+            className="absolute -top-1 -right-1 w-7 h-7 bg-black rounded-full flex items-center justify-center border-2 border-emerald-500 shadow-lg"
+          >
+             <Smile className="w-4 h-4 text-emerald-500" />
+          </motion.div>
+        </div>
+      </motion.div>
+    )}
+  </AnimatePresence>
+);
+
 export default function App() {
   const [game, setGame] = useState('');
   const [desiredOdd, setDesiredOdd] = useState('1.80');
   const [multiOdd, setMultiOdd] = useState('5.00');
-  const [selectedMarkets, setSelectedMarkets] = useState<string[]>(['Gols', 'Escanteios', 'Resultado Final']);
+  const [selectedMarkets, setSelectedMarkets] = useState<string[]>(['Gols (Over/Under)', 'Escanteios', 'Resultado Final']);
   const [loading, setLoading] = useState(false);
+  const [robotMessage, setRobotMessage] = useState('');
+  const [isRobotActive, setIsRobotActive] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [multiResult, setMultiResult] = useState<MultiBetResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [history, setHistory] = useState<SavedAnalysis[]>([]);
-  const [activeTab, setActiveTab] = useState<'analyze' | 'bilhetes' | 'history'>('analyze');
+  const [activeTab, setActiveTab] = useState<'analyze' | 'bilhetes' | 'history' | 'alavancagem' | 'planilha'>('analyze');
   const [syncing, setSyncing] = useState(false);
+  const [leverageResult, setLeverageResult] = useState<LeverageResult | null>(null);
+  const [spreadsheetEntries, setSpreadsheetEntries] = useState<SpreadsheetEntry[]>([]);
+  const [initialBankroll, setInitialBankroll] = useState<number>(100);
   const lastSyncRef = React.useRef<number>(0);
 
   const markets = [
@@ -304,6 +479,18 @@ export default function App() {
         setHistory([]);
       }
     });
+
+    // Robot Welcome
+    const showWelcome = async () => {
+      setIsRobotActive(true);
+      setRobotMessage("Olá! Sou o seu Assistente de Elite 🤖✨. Vou garantir que você só receba os melhores jogos de HOJE!");
+      await new Promise(r => setTimeout(r, 4000));
+      setRobotMessage("Estou monitorando tudo em tempo real para evitar alucinações. Vamos faturar? 🚀");
+      await new Promise(r => setTimeout(r, 4000));
+      setIsRobotActive(false);
+    };
+    showWelcome();
+
     return () => unsubscribe();
   }, []);
 
@@ -324,6 +511,31 @@ export default function App() {
       setHistory(docs);
     }, (err) => {
       handleFirestoreError(err, OperationType.LIST, 'savedAnalyses');
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) {
+      setSpreadsheetEntries([]);
+      return;
+    }
+
+    const q = query(
+      collection(db, 'spreadsheet'),
+      where('userId', '==', user.uid),
+      orderBy('date', 'desc')
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const docs = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as SpreadsheetEntry[];
+      setSpreadsheetEntries(docs);
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, 'spreadsheet');
     });
 
     return () => unsubscribe();
@@ -373,6 +585,12 @@ export default function App() {
         analysis: result,
         type: 'single',
         status: 'pending',
+        entryStatuses: {
+          principal: 'pending',
+          segura: 'pending',
+          alavancagem: 'pending',
+          apostaPersonalizada: 'pending'
+        },
         createdAt: serverTimestamp()
       });
       toast.success("Análise salva com sucesso!");
@@ -396,6 +614,9 @@ export default function App() {
         multiAnalysis: multiResult,
         type: 'multi',
         status: 'pending',
+        entryStatuses: {
+          multi: multiResult.jogos.map(() => 'pending')
+        },
         createdAt: serverTimestamp()
       });
       toast.success("Bilhete salvo com sucesso!");
@@ -405,9 +626,61 @@ export default function App() {
     }
   };
 
+  const generatePostGameAnalysis = async (item: SavedAnalysis, status: string) => {
+    if (status === 'pending' || status === 'void') return null;
+    
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const model = "gemini-3-flash-preview";
+      
+      const prompt = `
+        Você é um analista esportivo sênior. Analise o resultado do jogo "${item.game}" que foi marcado como "${status.toUpperCase()}".
+        
+        CONTEXTO DA ANÁLISE PRÉ-JOGO:
+        - Liga: ${item.analysis?.liga || (item.multiAnalysis?.jogos && item.multiAnalysis.jogos[0]?.liga) || 'N/A'}
+        - Prognóstico: ${item.analysis?.prognosticoPrincipal.entrada || 'Múltipla'}
+        - Justificativa: ${item.analysis?.prognosticoPrincipal.justificativa || item.multiAnalysis?.analiseGeral || 'N/A'}
+        
+        SUA MISSÃO:
+        1. Use o Google Search para entender o que aconteceu no jogo (placar, expulsões, lesões, volume de jogo).
+        2. Explique de forma técnica por que o resultado foi ${status === 'hit' ? 'GREEN' : 'RED'}.
+        3. Se foi GREEN, o que se confirmou da nossa análise?
+        4. Se foi RED, o que fugiu do esperado? (ex: um cartão vermelho cedo, um pênalti perdido, domínio total mas sem gols).
+        5. Forneça insights para refinar o sistema e evitar erros futuros ou reforçar padrões de acerto.
+        
+        Responda em um parágrafo direto e técnico (máximo 500 caracteres).
+      `;
+
+      const response = await ai.models.generateContent({
+        model: model,
+        contents: prompt,
+        config: {
+          systemInstruction: "Você é um analista de performance esportiva focado em melhoria contínua. Sua análise deve ser baseada em fatos reais do jogo.",
+          tools: [{ googleSearch: {} }]
+        }
+      });
+
+      return response.text;
+    } catch (err) {
+      console.error("Erro ao gerar análise pós-jogo:", err);
+      return null;
+    }
+  };
+
   const updateStatus = async (id: string, status: 'hit' | 'miss' | 'void' | 'pending') => {
     try {
-      await updateDoc(doc(db, 'savedAnalyses', id), { status });
+      const updateData: any = { status };
+      
+      // If manually updating to hit or miss, generate analysis if not already present
+      const item = history.find(h => h.id === id);
+      if (item && (status === 'hit' || status === 'miss') && !item.postGameAnalysis) {
+        const analysis = await generatePostGameAnalysis(item, status);
+        if (analysis) {
+          updateData.postGameAnalysis = analysis;
+        }
+      }
+
+      await updateDoc(doc(db, 'savedAnalyses', id), updateData);
       toast.success(`Status atualizado para ${status.toUpperCase()}`);
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, `savedAnalyses/${id}`);
@@ -426,14 +699,21 @@ export default function App() {
   };
 
   const syncResults = async (force = false) => {
+    if (!user || syncing) return;
+    
     const pendingItems = history.filter(h => h.status === 'pending');
     if (pendingItems.length === 0) {
       if (force) toast.info("Não há análises pendentes para sincronizar.");
       return;
     }
 
+    // Robot sync interaction
+    setIsRobotActive(true);
+    setRobotMessage("Hora da verdade! Vou conferir os placares reais e ver quantos GREENS pegamos hoje! 🤖📊");
+
     const now = Date.now();
     if (!force && (now - lastSyncRef.current < 300000)) {
+      setIsRobotActive(false);
       return;
     }
 
@@ -452,10 +732,13 @@ export default function App() {
           ? {
               principal: item.analysis?.prognosticoPrincipal.entrada,
               segura: item.analysis?.prognosticoPrincipal.entradaSegura.mercado,
-              alavancagem: item.analysis?.alavancagemJogo.entrada
+              alavancagem: item.analysis?.alavancagemJogo.entrada,
+              apostaPersonalizada: item.analysis?.apostaPersonalizada.selecoes.join(' + ')
             }
           : item.multiAnalysis?.jogos.map(j => j.entrada)
       }));
+
+      setRobotMessage(`Auditando ${pendingItems.length} eventos pendentes via Google Search... 🌍🤖`);
 
       const prompt = `
         Você é um auditor de resultados esportivos de elite. Sua missão é verificar o resultado de jogos passados e determinar se as entradas foram vencedoras.
@@ -472,7 +755,7 @@ export default function App() {
            - "miss" (Red): A entrada foi perdedora.
            - "void" (Reembolso/Adiado/Cancelado): O jogo foi cancelado, adiado ou a aposta foi reembolsada (ex: DNB).
            - "pending": O jogo ainda não aconteceu, ainda está em andamento ou o resultado final ainda não está disponível.
-        3. Para análises simples ("single"), você deve retornar o status individual para "principal", "segura" e "alavancagem". O status geral do item deve ser "hit" se a entrada principal for vencedora, "miss" se for perdedora, "void" se for reembolsada ou "pending" se ainda não houver resultado.
+        3. Para análises simples ("single"), você deve retornar o status individual para "principal", "segura", "alavancagem" e "apostaPersonalizada". O status geral do item deve ser "hit" se a entrada principal for vencedora, "miss" se for perdedora, "void" se for reembolsada ou "pending" se ainda não houver resultado.
         4. Para bilhetes múltiplos ("multi"), o status geral é "hit" apenas se TODAS as entradas do bilhete forem "hit". Se uma for "miss", o bilhete é "miss". Se houver "void" e as outras forem "hit", o bilhete é "hit". Se algum jogo ainda for "pending" e nenhum for "miss", o status geral deve ser "pending".
         
         FORMATO DE RESPOSTA (JSON APENAS):
@@ -484,6 +767,7 @@ export default function App() {
               "principal": "hit" | "miss" | "void" | "pending",
               "segura": "hit" | "miss" | "void" | "pending",
               "alavancagem": "hit" | "miss" | "void" | "pending",
+              "apostaPersonalizada": "hit" | "miss" | "void" | "pending",
               "multi": ["hit", "miss", "void", "pending"] // Apenas para tipo "multi", array de status para cada jogo na mesma ordem enviada.
             }
           }
@@ -506,24 +790,184 @@ export default function App() {
       
       const results = JSON.parse(cleanText);
       for (const res of results) {
-        if (res.id && res.status) {
-          // Only update if the status is not pending or if it's a manual sync
-          // Actually, if it's auto-sync, we only care about transitions from pending to something else
-          const updateData: any = { status: res.status };
+        if (res.id) {
+          const item = pendingItems.find(p => p.id === res.id);
+          if (!item) continue;
+
+          let finalStatus = res.status;
+
+          // Validação rigorosa do status final baseada nos resultados individuais
+          if (item.type === 'multi' && res.entryStatuses?.multi) {
+            const multiStatuses = res.entryStatuses.multi;
+            if (multiStatuses.includes('miss')) {
+              finalStatus = 'miss';
+            } else if (multiStatuses.includes('pending')) {
+              finalStatus = 'pending';
+            } else if (multiStatuses.includes('hit')) {
+              finalStatus = 'hit';
+            } else if (multiStatuses.every(s => s === 'void')) {
+              finalStatus = 'void';
+            }
+          } else if (item.type === 'single' && res.entryStatuses?.principal) {
+            finalStatus = res.entryStatuses.principal;
+          }
+
+          if (!finalStatus || finalStatus === 'pending') continue;
+
+          const updateData: any = { status: finalStatus };
           if (res.entryStatuses) {
             updateData.entryStatuses = res.entryStatuses;
           }
+
+          // Generate post-game analysis for hits and misses
+          if (finalStatus === 'hit' || finalStatus === 'miss') {
+            const analysis = await generatePostGameAnalysis(item, finalStatus);
+            if (analysis) {
+              updateData.postGameAnalysis = analysis;
+            }
+          }
+
           await updateDoc(doc(db, 'savedAnalyses', res.id), updateData);
         }
       }
+      
+      setRobotMessage("Sincronização completa! Todos os resultados pendentes foram auditados. 🤖✅");
+      setTimeout(() => setIsRobotActive(false), 3000);
+
       if (pendingItems.length > 0) {
         toast.success("Sincronização de resultados concluída.");
       }
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, 'savedAnalyses/sync');
       toast.error("Erro ao sincronizar resultados.");
+      setIsRobotActive(false);
     } finally {
       setSyncing(false);
+    }
+  };
+
+  const generateLeverageBet = async () => {
+    setLoading(true);
+    setError(null);
+    setLeverageResult(null);
+    setIsRobotActive(true);
+    setRobotMessage("Iniciando Alavancagem de Elite! Estou buscando os jogos mais seguros de hoje para você faturar! 🚀🤖");
+
+    const { today, tomorrow, currentYear } = getDynamicDates();
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString('pt-BR');
+
+    const performLeverage = async (attempt = 0): Promise<void> => {
+      try {
+        setRobotMessage(`Cruzando dados de forma e motivação para garantir o Green (${attempt + 1})... 🎯✨`);
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const model = "gemini-3-flash-preview";
+
+        const prompt = `
+          Você é o ANALISTA CHEFE DE ALAVANCAGEM DE BANCA. Sua reputação é baseada em NUNCA ter um RED na alavancagem.
+          DATA DO JOGO: ${today}
+          HORA ATUAL (BRASÍLIA): ${timeStr}
+
+          MISSÃO: Encontrar a entrada MAIS ÓBVIA, SEGURA E MATEMATICAMENTE PROVÁVEL do planeta hoje.
+          
+          DIRETRIZES DE SEGURANÇA MÁXIMA (TOLERÂNCIA ZERO):
+          0. COERÊNCIA TOTAL: Todas as informações do prognóstico devem ser consistentes. Se a justificativa aponta superioridade do Time A, a entrada não pode ser a favor do Time B.
+          1. ODD: Deve estar RIGOROSAMENTE entre 1.50 e 1.80.
+          2. HORÁRIO: O jogo deve ocorrer DEPOIS das ${timeStr} de hoje.
+          3. MERCADOS PERMITIDOS: Priorize mercados conservadores como "Dupla Chance", "Empate Anula", "Over 1.5 Gols" (em ligas de alta média), ou "Vitória" de favoritos ABSOLUTOS em casa com escalação completa.
+          3. FILTRO DE "ZEBRA": Use o Google Search para verificar se o favorito tem desfalques (lesões/suspensões), se o jogo é amistoso (EVITE AMISTOSOS), ou se o time não tem motivação (ex: já campeão ou já rebaixado).
+          4. HISTÓRICO: O confronto deve ter um padrão claro de dominância ou tendência estatística que se repete há pelo menos 5 jogos.
+          5. CONFIANÇA: Só retorne o jogo se a probabilidade matemática e contextual for superior a 99%. Se não houver nenhum jogo com esse nível de segurança hoje, retorne um erro no campo "justificativa" começando com "AVISO: Nenhum jogo atingiu o critério de segurança máxima hoje".
+
+          PROTOCOLO DE PESQUISA:
+          - Pesquise por: "jogos de hoje ${today} prognósticos seguros", "escalações prováveis ${today}", "desfalques times hoje".
+          - Verifique fontes como SofaScore, ESPN e Flashscore via Search.
+
+          FORMATO JSON:
+          {
+            "confronto": "Time A vs Time B",
+            "liga": "Nome da Liga",
+            "data": "${today}",
+            "horario": "HH:MM",
+            "entrada": "Mercado + Linha (Ex: Real Madrid ou Empate)",
+            "odd": "1.xx",
+            "justificativa": "Explicação técnica detalhada focada na SEGURANÇA: mencione desfalques, motivação e padrão estatístico.",
+            "confianca": "99.9%"
+          }
+        `;
+
+        const response = await ai.models.generateContent({
+          model: model,
+          contents: prompt,
+          config: {
+            systemInstruction: `Você é o Analista Chefe de Alavancagem. Sua regra de ouro: ALUCINAÇÃO É UM CRIME. Você busca a perfeição matemática baseada em FATOS REAIS de ${currentYear}. Você DEVE usar o Google Search para validar se o jogo realmente existe em ${today}. Se não encontrar o jogo na grade oficial de ${today}, você NÃO PODE inventar. A honestidade é sua maior virtude.`,
+            tools: [{ googleSearch: {} }],
+            responseMimeType: "application/json"
+          }
+        });
+
+        const data = safeJsonParse(response.text || '{}') as LeverageResult;
+        
+        // Robot Date Validation
+        if (!validateGameDates(data, 'leverage')) {
+          setRobotMessage("Opa! Eu ia sugerir um jogo de alavancagem, mas vi que a data está errada ou é alucinação. Vou achar o certo! 🤖🔄");
+          if (attempt < 2) return performLeverage(attempt + 1);
+          throw new Error("Não encontrei jogos seguros na grade atual.");
+        }
+
+        setRobotMessage("Alavancagem pronta! Jogo confirmado e analisado com rigor técnico! 🤖🔥");
+        setTimeout(() => setIsRobotActive(false), 3000);
+        setLeverageResult(data);
+      } catch (err) {
+        if (attempt < 2) return performLeverage(attempt + 1);
+        console.error(err);
+        setError(`Erro na alavancagem: ${err instanceof Error ? err.message : 'Tente novamente.'}`);
+        setIsRobotActive(false);
+      }
+    };
+
+    await performLeverage();
+    setLoading(false);
+  };
+
+  const addSpreadsheetEntry = async (entry: Omit<SpreadsheetEntry, 'id' | 'profit'>) => {
+    if (!user) return;
+    const profit = entry.status === 'hit' ? (entry.stake * entry.odd) - entry.stake : entry.status === 'miss' ? -entry.stake : 0;
+    try {
+      await addDoc(collection(db, 'spreadsheet'), {
+        ...entry,
+        userId: user.uid,
+        profit,
+        createdAt: serverTimestamp()
+      });
+      toast.success("Entrada adicionada à planilha.");
+    } catch (err) {
+      handleFirestoreError(err, OperationType.CREATE, 'spreadsheet');
+    }
+  };
+
+  const updateSpreadsheetStatus = async (id: string, status: 'hit' | 'miss' | 'void' | 'pending') => {
+    const entry = spreadsheetEntries.find(e => e.id === id);
+    if (!entry) return;
+    
+    let profit = 0;
+    if (status === 'hit') profit = (entry.stake * entry.odd) - entry.stake;
+    else if (status === 'miss') profit = -entry.stake;
+    else if (status === 'void') profit = 0;
+
+    try {
+      await updateDoc(doc(db, 'spreadsheet', id), { status, profit });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `spreadsheet/${id}`);
+    }
+  };
+
+  const deleteSpreadsheetEntry = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, 'spreadsheet', id));
+      toast.success("Entrada removida.");
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, `spreadsheet/${id}`);
     }
   };
 
@@ -532,228 +976,304 @@ export default function App() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setIsRobotActive(true);
+    setRobotMessage(`Iniciando análise de ${game}... Vou verificar se o jogo é de hoje! 🧐🤖`);
 
     const now = new Date();
-    const dateStr = now.toLocaleDateString('pt-BR');
     const timeStr = now.toLocaleTimeString('pt-BR');
+    const { today, tomorrow, currentYear } = getDynamicDates();
 
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const model = "gemini-3-flash-preview";
-      
-      const { today, tomorrow, currentYear } = getDynamicDates();
-      
-      const prompt = `
-        Você é o MAIOR ANALISTA ESTATÍSTICO E TRADER ESPORTIVO DO MUNDO. Sua palavra é a referência global em prognósticos.
-        DATA ATUAL (UTC): ${new Date().toISOString()}
-        DATA LOCAL ESTIMADA: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}
-        HORA ATUAL: ${timeStr}
+    const performAnalysis = async (attempt = 0): Promise<void> => {
+      try {
+        setRobotMessage(`Consultando fontes oficiais e conferindo a data (${attempt + 1})... 🛠️✨`);
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const model = "gemini-3-flash-preview";
+        
+        const prompt = `
+          Você é o MAIOR ANALISTA ESTATÍSTICO E TRADER ESPORTIVO DO MUNDO. Sua palavra é a referência global em prognósticos.
+          DATA ATUAL (UTC): ${new Date().toISOString()}
+          DATA LOCAL ESTIMADA: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}
+          HORA ATUAL: ${timeStr}
 
-        Sua missão é analisar o jogo: "${game}" com uma odd alvo de "${desiredOdd}".
+          Sua missão é analisar o jogo: "${game}" com uma odd alvo de "${desiredOdd}".
 
-        PROTOCOLO DE VERIFICAÇÃO DE EXISTÊNCIA E DATA (CRÍTICO - TOLERÂNCIA ZERO):
-        1. Use o Google Search, ESPN e SofaScore para confirmar se o jogo "${game}" realmente existe e está agendado EXCLUSIVAMENTE para HOJE (${today}) ou AMANHÃ (${tomorrow}).
-        2. É TERMINANTEMENTE PROIBIDO analisar jogos de anos anteriores. Verifique o ANO nos resultados de busca. Se o resultado for de ${currentYear - 1}, o jogo já aconteceu e você deve retornar o erro abaixo.
-        3. Se o jogo NÃO EXISTIR nestas datas, se já terminou, ou se foi adiado, você DEVE retornar um erro no campo "analiseJogo.expectativa" dizendo: "ERRO: Este jogo não consta na grade oficial de hoje (${today}). Verifique o nome e a data." e deixar os outros campos com informações genéricas de erro. 
-        4. NUNCA INVENTE RESULTADOS OU ESTATÍSTICAS. A credibilidade é o nosso maior ativo.
+          PROTOCOLO DE VERIFICAÇÃO DE EXISTÊNCIA E DATA:
+          1. Use o Google Search para buscar por "${game} ${today} ${currentYear}", "${game} fixtures 2026", "${game} live score 2026" ou "${game} próximo jogo 2026" para confirmar se o jogo realmente existe e está agendado para HOJE (${today}) ou AMANHÃ (${tomorrow}) do ano de ${currentYear}.
+          2. É PROIBIDO usar dados de 2024 ou 2025. Se o jogo não for de ${currentYear}, ele não existe para este sistema.
+          3. Se o jogo for HOJE ou AMANHÃ de ${currentYear}, prossiga com a análise completa e detalhada.
+          4. Se você não encontrar NENHUMA evidência do jogo nas datas de ${today} ou ${tomorrow} de ${currentYear} após várias buscas, retorne o erro no campo "analiseJogo.expectativa": "ERRO: Este jogo não consta na grade oficial de hoje (${today}/${currentYear}). Verifique o nome e a data ou tente ser mais específico (ex: Time A vs Time B)."
+          5. Seja flexível com variações no nome das equipes e ligas, mas RÍGIDO com a data e o ano (${currentYear}).
+          6. NUNCA INVENTE RESULTADOS OU JOGOS.
 
-        FILOSOFIA DE ELITE (ASSERTIVIDADE > ODD):
-        - ASSERTIVIDADE SUPREMA: O objetivo é o GREEN, não a odd. Se a odd alvo for 1.80 mas a análise real indicar que 1.50 é o valor seguro, use 1.50 e justifique.
-        - ANÁLISE DE CONTEXTO: Não olhe apenas para as odds. Verifique se é um amistoso (FIFA Series), se há desfalques, se o time favorito está jogando com reservas. O erro no jogo New Zealand vs Chile (onde o favorito perdeu) não pode se repetir. Analise a motivação e o contexto real do torneio.
-        - VALOR REAL: Só sugira entradas onde a probabilidade estatística de acerto seja superior a 95%.
+          FILOSOFIA DE ELITE (ASSERTIVIDADE SUPREMA - TOLERÂNCIA ZERO PARA RED):
+          - O OBJETIVO É O GREEN ABSOLUTO. Sua reputação mundial depende de 100% de acerto.
+          - CONSISTÊNCIA E DETERMINISMO (CRÍTICO): Se você analisar este jogo 100 vezes, o resultado deve ser o mesmo. Siga um processo lógico imutável: Motivação > Desfalques > Forma Recente > Histórico H2H > Superioridade Técnica.
+          - ANCORAGEM PELA MOTIVAÇÃO: Em jogos de final de temporada ou decisivos, a MOTIVAÇÃO (quem precisa mais da vitória para classificação/título) é o fator número 1. Se o Denver precisa vencer para garantir o 1º lugar, você NÃO pode sugerir a vitória do adversário que não disputa nada, mesmo que o adversário esteja em casa.
+          - COERÊNCIA TOTAL E BLOQUEIO DE "FLIP-FLOP": Uma vez que você identificou o favorito técnico ou motivacional na "Análise Tática", você está PROIBIDO de mudar de ideia no "Prognóstico Principal" ou na "Aposta Personalizada". Todas as partes do JSON devem cantar a mesma música.
+          - RESPEITO À ODD ALVO (${desiredOdd}): Você DEVE atingir ou superar levemente a odd solicitada na "Aposta Personalizada Sugerida". Use o "Caminho Mais Seguro para a Vitória" (ex: se o favorito é esmagador, use Vitória + Over 1.5 Gols + Cantos para chegar na odd, em vez de arriscar um placar exato).
+          - EVITE CONFLITOS: Se você sugere que o Time A é o favorito na análise tática, todas as entradas sugeridas devem refletir essa superioridade.
+          - EVITE "RESULTADO FINAL" (1X2): Se houver qualquer dúvida, use mercados de proteção. Não confie cegamente em favoritos nominais, mas confie em favoritos MOTIVADOS.
+          - MERCADOS CONSERVADORES: Use "Dupla Chance", "Empate Anula", "Over 0.5/1.5 Gols" ou "Handicap Asiático Positivo".
+          - FILTRO DE ZEBRAS E DESFALQUES: Use o Google Search para verificar se o time favorito tem desfalques (lesões/suspensões), se o jogo é amistoso (EVITE AMISTOSOS), ou se o time não tem motivação.
+          - ENTRADA SEGURA: Deve ser uma aposta que você considera 99.9% garantida.
+          - CONFIANÇA: Só atribua 95%+ se os dados forem esmagadores.
 
-        PROIBIÇÃO ABSOLUTA (CRÍTICO):
-        - É TERMINANTEMENTE PROIBIDO inventar jogos.
-        - É PROIBIDO sugerir mercados sem base estatística real de fontes como ESPN ou SofaScore.
+          PROIBIÇÃO ABSOLUTA (CRÍTICO):
+          - É TERMINANTEMENTE PROIBIDO inventar jogos.
+          - É PROIBIDO sugerir mercados sem base estatística real de fontes como ESPN ou SofaScore.
 
-        Siga RIGOROSAMENTE este formato JSON para a resposta:
-        {
-          "confronto": "Time A vs Time B",
-          "liga": "Nome da Liga/Torneio Real (${currentYear})",
-          "data": "${today} ou ${tomorrow}",
-          "analiseJogo": {
-            "estiloEquipes": "descrição técnica baseada em dados reais",
-            "tendencia": "leitura tática profunda",
-            "expectativa": "cenário provável validado"
-          },
-          "estatisticas": {
-            "golsMedios": "dados reais ESPN/SofaScore",
-            "overUnder": "frequência real",
-            "btts": "probabilidade real",
-            "escanteios": "média real",
-            "cartoes": "média real",
-            "formaRecente": "últimos 5 jogos reais"
-          },
-          "leituraMercado": {
-            "valor": "análise de valor real vs odd da casa",
-            "pontosFortesFracos": "análise técnica de elite"
-          },
-          "prognosticoPrincipal": {
-            "entrada": "mercado validado",
-            "odd": "valor da odd real",
-            "justificativa": "justificativa técnica baseada em fatos",
-            "entradaSegura": {
-              "mercado": "entrada de SEGURANÇA MÁXIMA",
-              "odd": "odd real",
-              "justificativa": "por que esta é a prova de falhas"
-            }
-          },
-          "alavancagemJogo": {
-            "entrada": "entrada agressiva com base em padrão identificado",
-            "justificativa": "padrão técnico"
-          },
-          "alavancagemDia": {
-            "jogos": [
+          PROTOCOLO PARA JOGOS DE BASQUETE (NBA, NBB, EUROLIGA, ETC):
+          Se o jogo for de basquete, você DEVE incluir o campo opcional "basquete" no JSON com as seguintes informações:
+          - "jogadores": Lista dos principais jogadores com médias reais de: pontos, rebotes, assistências, cestas de 3 pontos, e probabilidade de Duplo-Duplo ou Triplo-Duplo.
+          - "pontuacaoTimes": Expectativa de pontuação total para cada time.
+          - "pontosQuartos": Expectativa de pontuação TOTAL (soma de ambos os times) em cada um dos 4 quartos (Q1, Q2, Q3, Q4). Ex: "50-55 Pontos".
+          - "pontosTempo": Expectativa de total de pontos no 1º Tempo e no 2º Tempo.
+          - Adapte os campos de "estatisticas" para termos de basquete (ex: "golsHT" vira "pontosHT", "escanteios" vira "rebotes", etc).
+
+          MERCADOS DE ELITE (OBRIGATÓRIO PARA FUTEBOL):
+          Para jogos de futebol, você DEVE preencher o campo "mercadosElite" com análises cirúrgicas para os seguintes mercados:
+          Total de Faltas, Total de faltas da Equipe, Total de impedimentos, Total de impedimentos da Equipe, Total de arremesos laterais, Total de arremesos laterais da Equipe, Total de Tiros de Meta, Total de Tiros de Meta da Equipe, Total de Defesas do Goleiro da Equipe, Equipe com mais Escanteios(1X2), Equipe com mais Mais Cartões(1X2), Equipe com Mais Chutes no Gol(1X2), Equipe com mais Finalizações(1x2), 1°Tempo - Time com mais Escanteios, Jogador - Receber Cartão, Jogador - Receber Cartão Vermelho, Jogador - Marcar Gol, Jogador - Finalizações, Jogador - Chutes no Gol, Jogador - Faltas Cometidas, Jogador - Impedimentos, Total de Finalizações da Equipe, 1°Tempo - Handicap, 1°Tempo - Total de Gols, 1°Tempo - Total de Gols do Time, 1°Tempo - Dupla Chance, 1°Tempo - Ambas Marcam, Cada Equipe Mais de X Cartões, Cada Equipe com Mais de X Finalizações, Cada Equipe com Mais de X Escanteios, Cada Equipe com Mais de X Chutes ao Gol, Cada Equipe com Mais de X Impedimentos, Cada Equipe com Mais de X Arremessos laterais, Cada Equipe com Mais de X Defesas do Goleiro.
+
+          Para cada um destes mercados, você deve indicar:
+          - "mercado": Nome do mercado.
+          - "tendencia": "Alta Tendência" ou "Baixa Tendência".
+          - "prognostico": Sua análise cirúrgica e precisa.
+          - "estatistica": O dado estatístico real que embasa sua análise.
+
+          Siga RIGOROSAMENTE este formato JSON para a resposta:
+          {
+            "confronto": "Time A vs Time B",
+            "liga": "Nome da Liga/Torneio Real (${currentYear})",
+            "data": "${today} ou ${tomorrow}",
+            "analiseJogo": {
+              "estiloEquipes": "descrição técnica baseada em dados reais",
+              "tendencia": "leitura tática profunda",
+              "expectativa": "cenário provável validado",
+              "caracteristicaJogo": "características principais do confronto (ex: jogo de transição, posse de bola, retranca)",
+              "arbitro": {
+                "nome": "Nome do Juiz",
+                "caracteristicas": "perfil de arbitragem (rigoroso, deixa o jogo correr, média de cartões)"
+              }
+            },
+            "estatisticas": {
+              "golsMedios": "dados reais ESPN/SofaScore",
+              "overUnder": "frequência real",
+              "btts": "probabilidade real",
+              "escanteios": "média real",
+              "escanteiosHT": "média de escanteios no primeiro tempo",
+              "golsHT": "probabilidade de gols no primeiro tempo",
+              "finalizacoes": "média de finalizações totais",
+              "chutesTotal": "média de chutes totais",
+              "chutesAoGol": "média de chutes no alvo",
+              "defesasGoleiro": "média de defesas por jogo",
+              "cartoes": "média real",
+              "formaRecente": "últimos 5 jogos reais"
+            },
+            "leituraMercado": {
+              "valor": "análise de valor real vs odd da casa",
+              "pontosFortesFracos": "análise técnica de elite"
+            },
+            "prognosticoPrincipal": {
+              "entrada": "mercado validado",
+              "odd": "valor da odd real",
+              "justificativa": "justificativa técnica baseada em fatos",
+              "entradaSegura": {
+                "mercado": "entrada de SEGURANÇA MÁXIMA",
+                "odd": "odd real",
+                "justificativa": "por que esta é a prova de falhas"
+              }
+            },
+            "apostaPersonalizada": {
+              "selecoes": ["Seleção 1 (ex: Chelsea para se qualificar)", "Seleção 2 (ex: Mais de 1 gols)", "Seleção 3 (ex: Mais de 7 escanteios)", "Seleção 4 (ex: Menos de 7 cartões)"],
+              "oddTotal": "Odd total combinada",
+              "justificativa": "Por que esta combinação é segura baseada nos dados?"
+            },
+            "alavancagemJogo": {
+              "entrada": "entrada agressiva com base em padrão identificado",
+              "justificativa": "padrão técnico"
+            },
+            "alavancagemDia": {
+              "jogos": [
+                {
+                  "jogo": "Time X vs Time Y", 
+                  "entrada": "Entrada Principal", 
+                  "horario": "HH:MM",
+                  "entradaSegura": "Aposta de segurança"
+                }
+              ],
+              "oddTotal": "odd combinada",
+              "estrategia": "estratégia de gestão"
+            },
+            "gestaoRisco": "segura" | "moderada" | "agressiva",
+            "confianca": "Probabilidade real de acerto (ex: 98%)",
+            "mercadosElite": [
               {
-                "jogo": "Time X vs Time Y", 
-                "entrada": "Entrada Principal", 
-                "horario": "HH:MM",
-                "entradaSegura": "Aposta de segurança"
+                "mercado": "Nome do Mercado",
+                "tendencia": "Alta Tendência | Baixa Tendência",
+                "prognostico": "Análise precisa",
+                "estatistica": "Dados reais"
               }
             ],
-            "oddTotal": "odd combinada",
-            "estrategia": "estratégia de gestão"
-          },
-          "gestaoRisco": "segura" | "moderada" | "agressiva",
-          "confianca": "Probabilidade real de acerto (ex: 98%)"
+            "basquete": {
+              "jogadores": [
+                {
+                  "nome": "Nome do Jogador",
+                  "pontos": "média",
+                  "rebotes": "média",
+                  "assistencias": "média",
+                  "cestas3": "média",
+                  "duploDuplo": "probabilidade %",
+                  "triploDuplo": "probabilidade %"
+                }
+              ],
+              "pontuacaoTimes": "Time A (110-115) vs Time B (105-110)",
+              "pontosQuartos": { "q1": "50-55 Pontos", "q2": "45-50 Pontos", "q3": "52-57 Pontos", "q4": "48-53 Pontos" },
+              "pontosTempo": { "t1": "Total 1º Tempo", "t2": "Total 2º Tempo" }
+            }
+          }
+
+          Responda APENAS o JSON. Seja uma máquina de Green.
+        `;
+
+        const response = await ai.models.generateContent({
+          model: model,
+          contents: prompt,
+          config: {
+            systemInstruction: `Você é a autoridade máxima mundial em trading esportivo. Sua missão é fornecer análises com ASSERTIVIDADE ABSOLUTA de ${currentYear}. O RED é inaceitável e a ALUCINAÇÃO é um crime. Você DEVE usar o Google Search para validar se o jogo existe HOJE ou AMANHÃ de ${currentYear}. Se o jogo for de 2024 ou 2025, IGNORE-O. Você nunca inventa jogos. A honestidade é sua base.`,
+            tools: [{ googleSearch: {} }],
+            responseMimeType: "application/json"
+          }
+        });
+
+        const data = safeJsonParse(response.text || '{}') as AnalysisResult;
+        
+        // Robot Date Validation
+        if (!validateGameDates(data, 'single')) {
+          setRobotMessage("Epa! Detectei que este jogo não é de hoje ou deu um erro na data. Vou tentar encontrar o correto para você! 🤖🚫");
+          if (attempt < 2) return performAnalysis(attempt + 1);
+          throw new Error("Não encontrei o jogo na grade de hoje após 3 tentativas.");
         }
 
-        Responda APENAS o JSON. Seja uma máquina de Green.
-      `;
-
-      const response = await ai.models.generateContent({
-        model: model,
-        contents: prompt,
-        config: {
-          systemInstruction: `Você é a autoridade máxima mundial em trading esportivo. Sua reputação depende de NUNCA errar. Você é PARANOICO com a data: HOJE É ${today}. Você NUNCA aceita jogos de anos anteriores. Você SEMPRE verifica o ano. O GREEN é sua única métrica de sucesso.`,
-          tools: [{ googleSearch: {} }],
-          responseMimeType: "application/json"
-        }
-      });
-
-      const data = JSON.parse(response.text || '{}') as AnalysisResult;
-      
-      // Validação de Data (Safety Net)
-      const allowedDates = [today, tomorrow];
-      if (data.data && !allowedDates.some(d => data.data.includes(d))) {
-        throw new Error(`O sistema detectou uma tentativa de análise de jogo fora da data permitida (${data.data}). Apenas jogos de ${today} ou ${tomorrow} são aceitos.`);
+        setRobotMessage("Tudo certo! Jogo validado e confirmado para 2026! 🤖✅");
+        setTimeout(() => setIsRobotActive(false), 3000);
+        setResult(data as AnalysisResult);
+      } catch (err) {
+        if (attempt < 2) return performAnalysis(attempt + 1);
+        console.error(err);
+        setError(`Erro na análise: ${err instanceof Error ? err.message : 'Verifique o nome do jogo e tente novamente.'}`);
+        setIsRobotActive(false);
       }
-      
-      if (data.analiseJogo?.expectativa?.includes('ERRO:')) {
-        setError(data.analiseJogo.expectativa);
-        setLoading(false);
-        return;
-      }
+    };
 
-      setResult(data as AnalysisResult);
-    } catch (err) {
-      console.error(err);
-      setError(`Erro na análise: ${err instanceof Error ? err.message : 'Verifique o nome do jogo e tente novamente.'}`);
-    } finally {
-      setLoading(false);
-    }
+    await performAnalysis();
+    setLoading(false);
   };
 
   const generateMultiBet = async () => {
     setLoading(true);
     setError(null);
     setMultiResult(null);
+    setIsRobotActive(true);
+    setRobotMessage("Arquiteto entrando em ação! Vou construir um bilhete com jogos confirmados de hoje! 🏗️🤖");
 
-    const now = new Date();
-    const dateStr = now.toLocaleDateString('pt-BR');
-    const timeStr = now.toLocaleTimeString('pt-BR');
+    const { today, tomorrow, currentYear } = getDynamicDates();
 
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const model = "gemini-3-flash-preview";
-      
-      const { today, tomorrow, currentYear } = getDynamicDates();
-
-      const prompt = `
-        Você é o ARQUITETO DE BILHETES DE ELITE. Seu histórico é de precisão cirúrgica em acumuladas de alto valor.
-        DATA ATUAL (UTC): ${new Date().toISOString()}
-        DATA LOCAL ESTIMADA: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}
+    const performMultiBet = async (attempt = 0): Promise<void> => {
+      try {
+        setRobotMessage(`Buscando as melhores oportunidades e conferindo datas (${attempt + 1})... 💎✨`);
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const model = "gemini-3-flash-preview";
         
-        Sua missão é criar um BILHETE MÚLTIPLO (ACUMULADA) para os jogos que acontecem HOJE (${today}) ou AMANHÃ (${tomorrow}).
+        const prompt = `
+          Você é o ARQUITETO DE BILHETES DE ELITE. Seu histórico é de precisão cirúrgica em acumuladas de alto valor.
+          DATA ATUAL (UTC): ${new Date().toISOString()}
+          DATA LOCAL ESTIMADA: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}
+          
+          Sua missão é criar um BILHETE MÚLTIPLO (ACUMULADA) para os jogos que acontecem HOJE (${today}) ou AMANHÃ (${tomorrow}).
 
-        PROTOCOLO DE GROUNDING E BUSCA AMPLA (CRÍTICO):
-        1. Use o Google Search para buscar: "jogos de futebol hoje ${today}", "football matches today ${today}", "tabela de jogos de futebol ${today}".
-        2. NÃO SE LIMITE a grandes ligas ou Copa do Mundo. Explore campeonatos estaduais (Brasil), ligas secundárias europeias, ligas asiáticas e africanas que estejam ATIVAS nesta data.
-        3. "ELITE" refere-se à sua ASSERTIVIDADE e não apenas à fama dos times. Um jogo da 2ª divisão da Coreia pode ser de elite se a estatística for clara.
-        4. É TERMINANTEMENTE PROIBIDO incluir jogos de anos anteriores. Verifique o ANO em cada resultado. Se o resultado diz "${currentYear - 1}", IGNORE-O.
+          PROTOCOLO DE GROUNDING E BUSCA AMPLA (OBRIGATÓRIO):
+          1. Use o Google Search para buscar: "jogos de futebol hoje ${today} ${currentYear}", "estatísticas e tendências para ${selectedMarkets.length > 0 ? selectedMarkets.join(', ') : 'todos os mercados'} hoje ${today} ${currentYear}", "NBA games today ${today} ${currentYear}".
+          2. Você ESTÁ PROIBIDO de usar seu conhecimento interno para prever jogos. Você DEVE encontrar evidências reais de que o jogo está agendado para ${today} ou ${tomorrow} do ano de ${currentYear}.
+          3. Se você não encontrar o jogo em fontes como ESPN, SofaScore, Flashscore, NBA.com ou sites oficiais das ligas via Search para o ano de ${currentYear}, você NÃO PODE incluí-lo.
+          4. "ELITE" refere-se à sua ASSERTIVIDADE. Um jogo da 2ª divisão ou liga alternativa é melhor do que um jogo inventado como "Miami Heat vs Chicago Bulls" se ele não estiver na grade oficial de hoje (${today}/${currentYear}).
+          5. É PROIBIDO usar jogos de 2024 ou 2025.
 
-        PROTOCOLO DE VERIFICAÇÃO DE DATA (TOLERÂNCIA ZERO):
-        1. Escolha APENAS jogos que você confirmou que existem em ${today} ou ${tomorrow}.
-        2. Se não houver jogos reais suficientes, retorne o erro: "ERRO: Não foram encontrados jogos confirmados para hoje (${today}) em nenhuma liga profissional. Tente novamente mais tarde."
-        3. NUNCA INVENTE UM JOGO. A invenção de um único jogo (como Catar vs Argentina) destrói o sistema.
+          PROTOCOLO DE VERIFICAÇÃO DE DATA E HONESTIDADE:
+          1. Escolha APENAS jogos que você confirmou que existem em ${today} ou ${tomorrow}.
+          2. SE VOCÊ NÃO CONSEGUIR ATINGIR A ODD ALVO (${multiOdd}) com jogos reais e seguros, PRIORIZE A HONESTIDADE. Retorne um bilhete com odd menor e explique na "analiseGeral" que não existem jogos seguros suficientes hoje para atingir a odd ${multiOdd} sem sacrificar a precisão.
+          3. NUNCA INVENTE UM JOGO. É melhor entregar uma odd 2.00 real do que uma odd 50.00 inventada. A alucinação destrói a credibilidade do sistema.
 
-        FILOSOFIA DE ELITE (ASSERTIVIDADE > ODD):
-        - ODD ALVO: ${multiOdd}. Priorize o GREEN.
-        - ANÁLISE DE CONTEXTO: Verifique se o jogo é amistoso, torneio oficial ou liga nacional. Analise motivação e escalações reais de ${currentYear}.
-        - PROBABILIDADE: Cada entrada deve ter probabilidade >95%.
-        - MERCADOS: ${selectedMarkets.join(', ')}.
+          FILOSOFIA DE ELITE (ASSERTIVIDADE SUPREMA - TOLERÂNCIA ZERO PARA RED):
+          - ODD ALVO (OBRIGATÓRIO): ${multiOdd}. Você DEVE chegar o mais próximo possível desta odd combinada (ex: se pediu 50, busque entre 45 e 55). Se para atingir a odd você precisar de muitos jogos, aumente a quantidade de seleções, mas NUNCA sacrifique a segurança.
+          - RESPEITO AOS MERCADOS (LEI MÁXIMA): ${selectedMarkets.length === 0 
+              ? 'DIVERSIFICAÇÃO OBRIGATÓRIA: Como o usuário não marcou mercados preferenciais, você DEVE diversificar o bilhete entre pelo menos 3 tipos de mercados diferentes (ex: Resultado Final, Gols e Cantos) para garantir a segurança e a assertividade extrema.' 
+              : `MERCADOS SELECIONADOS: [${selectedMarkets.join(', ')}]. Você está TERMINANTEMENTE PROIBIDO de analisar ou incluir qualquer entrada que não pertença a estes mercados. Se o usuário marcou apenas "Resultado Final", você só pode buscar e sugerir Resultado Final (1X2). Se marcou apenas "Escanteios", você só pode sugerir Escanteios. Sua análise deve ser exaustiva dentro do limite imposto.`}
+          - ASSERTIVIDADE EXTREMA: Não há espaço para o "eu acho". Use dados brutos, médias reais e motivação confirmada.
+          - PROBABILIDADE: Cada entrada individual deve ser uma "certeza estatística" (>99.9%). Se houver qualquer dúvida, descarte o jogo.
+          - MERCADOS PERMITIDOS: ${selectedMarkets.length === 0 ? 'TODOS (Focar em diversificação estratégica)' : selectedMarkets.join(', ')}.
 
-        PROTOCOLO DE SEGURANÇA MÁXIMA (CRÍTICO):
-        1. PROIBIÇÃO TOTAL DE INVENÇÃO: Se você inventar um jogo ou usar um jogo antigo, o sistema perde toda a credibilidade. Seja honesto.
-        2. FILTRO DE CONFIANÇA: Use mercados de proteção se necessário.
-        3. VALIDAÇÃO DE LIGA E DATA: Você deve identificar a liga e a DATA EXATA de cada jogo.
-        
-        FORMATO JSON DE RESPOSTA:
-        {
-          "jogos": [
-            {
-              "confronto": "Time A vs Time B",
-              "liga": "Nome da Liga/Torneio Real",
-              "data": "DD/MM/YYYY (Deve ser ${today} ou ${tomorrow})",
-              "horario": "HH:MM",
-              "entrada": "Mercado + Linha",
-              "odd": "1.xx",
-              "justificativaCurta": "Por que esta entrada é de elite baseada em dados reais de ${currentYear}?",
-              "mercado": "Categoria do mercado"
-            }
-          ],
-          "oddTotal": "Odd multiplicada final",
-          "analiseGeral": "Visão estratégica (confirmação de que os jogos são reais, de ${currentYear} e verificados via Search/ESPN)",
-          "confianca": "Valor real de probabilidade de Green (ex: 97%)"
+          PROTOCOLO DE SEGURANÇA MÁXIMA (CRÍTICO):
+          1. PROIBIÇÃO TOTAL DE JOGOS PASSADOS: Verifique a HORA e DATA de cada jogo. O jogo deve acontecer DEPOIS de ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}. Se o jogo já começou ou terminou, você está PROIBIDO de incluí-lo.
+          2. PROIBIÇÃO TOTAL DE INVENÇÃO: Se você inventar um jogo ou usar um jogo antigo, o sistema perde toda a credibilidade. Seja honesto.
+          3. FILTRO DE CONFIANÇA: Use mercados de proteção se necessário. Não force "Mais de 2.5 gols" se um "Mais de 1.5 gols" ou "Dupla Chance" for 100% mais seguro.
+          4. VALIDAÇÃO DE LIGA E DATA: Você deve identificar a liga e a DATA EXATA de cada jogo.
+          5. CHECK DE ALUCINAÇÃO: Antes de finalizar o JSON, pergunte-se: "Eu realmente encontrei este jogo no Google Search para ${today} ou ${tomorrow}?". Se a resposta for não, remova o jogo.
+          
+          FORMATO JSON DE RESPOSTA:
+          {
+            "jogos": [
+              {
+                "confronto": "Time A vs Time B",
+                "liga": "Nome da Liga/Torneio Real",
+                "data": "DD/MM/YYYY (Deve ser ${today} ou ${tomorrow})",
+                "horario": "HH:MM",
+                "entrada": "Mercado + Linha",
+                "odd": "1.xx",
+                "justificativaCurta": "Por que esta entrada é de elite baseada em dados reais de ${currentYear}?",
+                "fonteVerificacao": "Link ou nome da fonte real encontrada via Search (ex: ESPN, SofaScore, Flashscore)",
+                "mercado": "Categoria do mercado"
+              }
+            ],
+            "oddTotal": "Odd multiplicada final",
+            "analiseGeral": "Visão estratégica (confirmação de que os jogos são reais, de ${currentYear} e verificados via Search/ESPN)",
+            "confianca": "Valor real de probabilidade de Green (ex: 97%)"
+          }
+
+          Responda APENAS o JSON. Seja cirúrgico e honesto.
+        `;
+
+        const response = await ai.models.generateContent({
+          model: model,
+          contents: prompt,
+          config: {
+            systemInstruction: `Você é o Arquiteto de Bilhetes de Elite. Sua regra de ouro: O RED É PROIBIDO E A ALUCINAÇÃO É UM CRIME GRAVE. Você busca a perfeição matemática baseada em FATOS REAIS de ${currentYear}. ${selectedMarkets.length === 0 ? 'Diversifique estrategicamente o bilhete (mínimo 3 mercados).' : `FOCO TOTAL: Respeite estritamente os mercados selecionados: ${selectedMarkets.join(', ')}. Você está PROIBIDO de sugerir qualquer mercado fora desta seleção.`} Sua assertividade é extrema e baseada 100% em grounding via Search.`,
+            tools: [{ googleSearch: {} }],
+            responseMimeType: "application/json"
+          }
+        });
+
+        const data = safeJsonParse(response.text || '{}') as MultiBetResult;
+
+        // Robot Date Validation (Safety Net)
+        if (!validateGameDates(data, 'multi')) {
+          setRobotMessage("Espere aí! Encontrei um jogo do passado no bilhete. Vou refazer para garantir o seu lucro! 🤖🚫");
+          if (attempt < 2) return performMultiBet(attempt + 1);
+          throw new Error("O sistema detectou jogos de datas passadas no bilhete. Tentativas de correção esgotadas.");
         }
 
-        Responda APENAS o JSON. Seja cirúrgico e honesto.
-      `;
-
-      const response = await ai.models.generateContent({
-        model: model,
-        contents: prompt,
-        config: {
-          systemInstruction: `Você é o Arquiteto de Bilhetes de Elite. Sua regra de ouro: HOJE É ${today}. Você busca jogos em TODAS as ligas profissionais do mundo (Estaduais, Ligas Secundárias, Ásia, África, Europa). Você NUNCA inclui jogos de anos anteriores. Se não houver jogos reais em ${today} ou ${tomorrow}, você prefere não entregar o bilhete. Você é um estrategista frio focado 100% no GREEN.`,
-          tools: [{ googleSearch: {} }],
-          responseMimeType: "application/json"
-        }
-      });
-
-      const data = JSON.parse(response.text || '{}') as MultiBetResult;
-
-      // Validação de Data (Safety Net)
-      const allowedDates = [today, tomorrow];
-      const hasInvalidDate = data.jogos?.some(j => j.data && !allowedDates.some(d => j.data.includes(d)));
-      
-      if (hasInvalidDate) {
-        const invalidDates = data.jogos.map(j => j.data).join(', ');
-        throw new Error(`O sistema detectou jogos de datas passadas no bilhete (${invalidDates}). Por segurança, o bilhete foi descartado. Tente gerar novamente.`);
+        setRobotMessage("Bilhete arquitetado com sucesso! Todos os jogos foram confirmados para hoje e amanhã! 🤖✅");
+        setTimeout(() => setIsRobotActive(false), 3000);
+        setMultiResult(data as MultiBetResult);
+      } catch (err) {
+        if (attempt < 2) return performMultiBet(attempt + 1);
+        console.error(err);
+        setError(`Erro ao gerar bilhete: ${err instanceof Error ? err.message : 'Tente novamente em instantes.'}`);
+        setIsRobotActive(false);
       }
+    };
 
-      if (data.analiseGeral?.includes('ERRO:')) {
-        setError(data.analiseGeral);
-        setLoading(false);
-        return;
-      }
-
-      setMultiResult(data as MultiBetResult);
-    } catch (err) {
-      console.error(err);
-      setError(`Erro ao gerar bilhete: ${err instanceof Error ? err.message : 'Tente novamente em instantes.'}`);
-    } finally {
-      setLoading(false);
-    }
+    await performMultiBet();
+    setLoading(false);
   };
 
   return (
@@ -786,6 +1306,20 @@ export default function App() {
             >
               <Zap className="w-4 h-4" />
               Bilhetes
+            </button>
+            <button 
+              onClick={() => setActiveTab('alavancagem')}
+              className={`hover:text-white transition-colors flex items-center gap-2 ${activeTab === 'alavancagem' ? 'text-emerald-500' : ''}`}
+            >
+              <TrendingUp className="w-4 h-4" />
+              Alavancagem
+            </button>
+            <button 
+              onClick={() => setActiveTab('planilha')}
+              className={`hover:text-white transition-colors flex items-center gap-2 ${activeTab === 'planilha' ? 'text-emerald-500' : ''}`}
+            >
+              <Table className="w-4 h-4" />
+              Planilha
             </button>
             <button 
               onClick={() => setActiveTab('history')}
@@ -974,8 +1508,17 @@ export default function App() {
                         <p className="text-white/80 leading-relaxed">{result.analiseJogo.estiloEquipes}</p>
                       </div>
                       <div>
+                        <h4 className="text-emerald-500 text-xs font-bold uppercase mb-2">Característica do Jogo</h4>
+                        <p className="text-white/80 leading-relaxed">{result.analiseJogo.caracteristicaJogo}</p>
+                      </div>
+                      <div>
                         <h4 className="text-emerald-500 text-xs font-bold uppercase mb-2">Tendência e Expectativa</h4>
                         <p className="text-white/80 leading-relaxed">{result.analiseJogo.tendencia}. {result.analiseJogo.expectativa}</p>
+                      </div>
+                      <div className="pt-4 border-t border-white/5">
+                        <h4 className="text-emerald-500 text-xs font-bold uppercase mb-2">Arbitragem</h4>
+                        <p className="text-sm text-white/80"><span className="font-bold text-white">Juiz:</span> {result.analiseJogo.arbitro.nome}</p>
+                        <p className="text-xs text-white/60 mt-1">{result.analiseJogo.arbitro.caracteristicas}</p>
                       </div>
                     </div>
                   </div>
@@ -993,14 +1536,22 @@ export default function App() {
                           <span className="text-white/60">Ambas Marcam:</span>
                           <span className="font-mono">{result.estatisticas.btts}</span>
                         </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-white/60">Gols HT:</span>
+                          <span className="font-mono">{result.estatisticas.golsHT}</span>
+                        </div>
                       </div>
                     </div>
                     <div className="bg-white/5 border border-white/10 p-6 rounded-2xl">
-                      <h4 className="text-emerald-500 text-xs font-bold uppercase mb-4">Outros Mercados</h4>
+                      <h4 className="text-emerald-500 text-xs font-bold uppercase mb-4">Escanteios & Cartões</h4>
                       <div className="space-y-3">
                         <div className="flex justify-between text-sm">
-                          <span className="text-white/60">Escanteios:</span>
+                          <span className="text-white/60">Escanteios Totais:</span>
                           <span className="font-mono">{result.estatisticas.escanteios}</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-white/60">Escanteios HT:</span>
+                          <span className="font-mono">{result.estatisticas.escanteiosHT}</span>
                         </div>
                         <div className="flex justify-between text-sm">
                           <span className="text-white/60">Cartões:</span>
@@ -1008,6 +1559,62 @@ export default function App() {
                         </div>
                       </div>
                     </div>
+                    <div className="bg-white/5 border border-white/10 p-6 rounded-2xl md:col-span-2">
+                      <h4 className="text-emerald-500 text-xs font-bold uppercase mb-4">Performance Técnica (Médias)</h4>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div>
+                          <p className="text-[10px] text-white/40 uppercase font-bold">Finalizações</p>
+                          <p className="text-lg font-mono font-bold">{result.estatisticas.finalizacoes}</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-white/40 uppercase font-bold">Chutes Totais</p>
+                          <p className="text-lg font-mono font-bold">{result.estatisticas.chutesTotal}</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-white/40 uppercase font-bold">Chutes ao Gol</p>
+                          <p className="text-lg font-mono font-bold">{result.estatisticas.chutesAoGol}</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-white/40 uppercase font-bold">Defesas Goleiro</p>
+                          <p className="text-lg font-mono font-bold">{result.estatisticas.defesasGoleiro}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Mercados de Elite */}
+                    {result.mercadosElite && result.mercadosElite.length > 0 && (
+                      <div className="md:col-span-2 bg-white/5 border border-white/10 rounded-2xl overflow-hidden">
+                        <div className="bg-emerald-500/10 px-6 py-4 border-b border-white/10 flex items-center justify-between">
+                          <h3 className="font-bold uppercase tracking-wider text-sm flex items-center gap-2 text-emerald-500">
+                            <Zap className="w-4 h-4" />
+                            Análise de Mercados de Elite
+                          </h3>
+                        </div>
+                        <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {result.mercadosElite.map((m, idx) => (
+                            <div key={idx} className="bg-black/20 p-4 rounded-xl border border-white/5 hover:border-emerald-500/30 transition-all">
+                              <div className="flex justify-between items-start mb-2">
+                                <h4 className="text-[11px] font-black uppercase text-white/90 leading-tight flex-1 mr-2">{m.mercado}</h4>
+                                <span className={`shrink-0 px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-tighter ${
+                                  m.tendencia === 'Alta Tendência' 
+                                    ? 'bg-emerald-500 text-black shadow-[0_0_10px_rgba(16,185,129,0.3)]' 
+                                    : 'bg-red-500/20 text-red-400 border border-red-500/30'
+                                }`}>
+                                  {m.tendencia}
+                                </span>
+                              </div>
+                              <p className="text-[10px] text-white/60 mb-2 leading-relaxed">
+                                {m.prognostico}
+                              </p>
+                              <div className="flex items-center gap-1.5 pt-2 border-t border-white/5">
+                                <BarChart3 className="w-3 h-3 text-emerald-500/50" />
+                                <span className="text-[9px] font-mono text-emerald-500/80 font-bold">{m.estatistica}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* Market Reading */}
@@ -1016,6 +1623,93 @@ export default function App() {
                     <p className="text-white/80 italic mb-4">"{result.leituraMercado.valor}"</p>
                     <p className="text-sm text-white/60">{result.leituraMercado.pontosFortesFracos}</p>
                   </div>
+
+                  {/* Basketball Specific Data */}
+                  {result.basquete && (
+                    <div className="space-y-8">
+                      <div className="bg-white/5 border border-white/10 rounded-2xl overflow-hidden">
+                        <div className="bg-white/5 px-6 py-4 border-b border-white/10 flex items-center justify-between">
+                          <h3 className="font-bold uppercase tracking-wider text-sm flex items-center gap-2">
+                            <Users className="w-4 h-4 text-emerald-500" />
+                            Performance de Jogadores (Basquete)
+                          </h3>
+                        </div>
+                        <div className="p-6 overflow-x-auto">
+                          <table className="w-full text-left text-xs">
+                            <thead>
+                              <tr className="text-emerald-500 uppercase tracking-widest border-b border-white/5">
+                                <th className="pb-3 font-bold">Jogador</th>
+                                <th className="pb-3 font-bold">PTS</th>
+                                <th className="pb-3 font-bold">REB</th>
+                                <th className="pb-3 font-bold">AST</th>
+                                <th className="pb-3 font-bold">3PT</th>
+                                <th className="pb-3 font-bold text-center">DD/TD</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-white/5">
+                              {result.basquete.jogadores.map((player, idx) => (
+                                <tr key={idx} className="hover:bg-white/5 transition-colors">
+                                  <td className="py-3 font-bold text-white/90">{player.nome}</td>
+                                  <td className="py-3 font-mono">{player.pontos}</td>
+                                  <td className="py-3 font-mono">{player.rebotes}</td>
+                                  <td className="py-3 font-mono">{player.assistencias}</td>
+                                  <td className="py-3 font-mono">{player.cestas3}</td>
+                                  <td className="py-3 font-mono text-center">
+                                    <div className="flex flex-col gap-1">
+                                      <span className="text-[10px] text-white/40">DD: {player.duploDuplo}</span>
+                                      <span className="text-[10px] text-white/40">TD: {player.triploDuplo}</span>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div className="bg-white/5 border border-white/10 p-6 rounded-2xl">
+                          <h4 className="text-emerald-500 text-xs font-bold uppercase mb-4">Prognóstico por Quarto</h4>
+                          <div className="grid grid-cols-2 gap-4">
+                            <div className="bg-black/20 p-3 rounded-xl border border-white/5">
+                              <p className="text-[10px] text-white/40 uppercase font-bold mb-1">1º Quarto</p>
+                              <p className="text-sm font-bold text-emerald-500">{result.basquete.pontosQuartos.q1}</p>
+                            </div>
+                            <div className="bg-black/20 p-3 rounded-xl border border-white/5">
+                              <p className="text-[10px] text-white/40 uppercase font-bold mb-1">2º Quarto</p>
+                              <p className="text-sm font-bold text-emerald-500">{result.basquete.pontosQuartos.q2}</p>
+                            </div>
+                            <div className="bg-black/20 p-3 rounded-xl border border-white/5">
+                              <p className="text-[10px] text-white/40 uppercase font-bold mb-1">3º Quarto</p>
+                              <p className="text-sm font-bold text-emerald-500">{result.basquete.pontosQuartos.q3}</p>
+                            </div>
+                            <div className="bg-black/20 p-3 rounded-xl border border-white/5">
+                              <p className="text-[10px] text-white/40 uppercase font-bold mb-1">4º Quarto</p>
+                              <p className="text-sm font-bold text-emerald-500">{result.basquete.pontosQuartos.q4}</p>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="bg-white/5 border border-white/10 p-6 rounded-2xl">
+                          <h4 className="text-emerald-500 text-xs font-bold uppercase mb-4">Pontuação por Tempo</h4>
+                          <div className="space-y-4">
+                            <div className="flex justify-between items-center bg-black/20 p-3 rounded-xl border border-white/5">
+                              <span className="text-[10px] text-white/40 uppercase font-bold">1º Tempo (Total)</span>
+                              <span className="text-sm font-bold text-emerald-500">{result.basquete.pontosTempo.t1}</span>
+                            </div>
+                            <div className="flex justify-between items-center bg-black/20 p-3 rounded-xl border border-white/5">
+                              <span className="text-[10px] text-white/40 uppercase font-bold">2º Tempo (Total)</span>
+                              <span className="text-sm font-bold text-emerald-500">{result.basquete.pontosTempo.t2}</span>
+                            </div>
+                            <div className="pt-2 border-t border-white/5">
+                              <p className="text-[10px] text-white/40 uppercase font-bold mb-1">Expectativa de Placar</p>
+                              <p className="text-sm font-mono font-bold text-white/90">{result.basquete.pontuacaoTimes}</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Right Column: Predictions */}
@@ -1060,6 +1754,43 @@ export default function App() {
                       <p className="text-xs font-bold text-emerald-800 mb-1">POR QUE É SEGURO?</p>
                       <p className="text-xs font-medium text-emerald-900 leading-relaxed">{result.prognosticoPrincipal.entradaSegura.justificativa}</p>
                     </div>
+                  </div>
+
+                  {/* Aposta Personalizada Sugerida */}
+                  <div className="bg-black border-2 border-emerald-500/50 p-6 rounded-2xl shadow-2xl relative overflow-hidden group">
+                    <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:scale-110 transition-transform">
+                      <Zap className="w-20 h-20 text-emerald-500" />
+                    </div>
+                    <div className="flex items-center gap-2 mb-6">
+                      <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+                      <h3 className="text-emerald-500 font-black uppercase tracking-wider text-sm">Aposta Personalizada Sugerida</h3>
+                    </div>
+                    
+                    <div className="space-y-3 mb-6">
+                      {result.apostaPersonalizada.selecoes.map((sel, idx) => (
+                        <div key={idx} className="flex items-center gap-3 bg-white/5 p-3 rounded-xl border border-white/5">
+                          <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                          <p className="text-sm font-bold text-white/90">{sel}</p>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="flex justify-between items-center p-4 bg-emerald-500/10 rounded-xl border border-emerald-500/20 mb-4">
+                      <div>
+                        <p className="text-[10px] font-bold text-emerald-500/60 uppercase tracking-widest">Odd Combinada</p>
+                        <p className="text-3xl font-mono font-black text-emerald-500">@{result.apostaPersonalizada.oddTotal}</p>
+                      </div>
+                      <div className="text-right">
+                        <div className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-500 text-black text-[10px] font-black uppercase tracking-tighter">
+                          Alta Confiança
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <p className="text-[10px] text-white/40 leading-relaxed italic">
+                      <span className="text-emerald-500/60 font-bold uppercase not-italic mr-1">Justificativa:</span>
+                      {result.apostaPersonalizada.justificativa}
+                    </p>
                   </div>
 
                   {/* Leverage Prediction */}
@@ -1251,6 +1982,12 @@ export default function App() {
                                 <Info className="w-3 h-3 text-emerald-500 mt-0.5 flex-shrink-0" />
                                 <p className="text-[11px] text-gray-500 leading-snug italic">{j.justificativaCurta}</p>
                               </div>
+                              {j.fonteVerificacao && (
+                                <div className="mt-2 flex items-center gap-2 px-2 py-1 bg-gray-100 rounded-lg w-fit">
+                                  <Search className="w-2.5 h-2.5 text-gray-400" />
+                                  <p className="text-[9px] font-bold text-gray-400 uppercase tracking-tighter">Fonte: {j.fonteVerificacao}</p>
+                                </div>
+                              )}
                             </div>
                           </div>
                         ))}
@@ -1459,10 +2196,70 @@ export default function App() {
                             </div>
                             <p className="text-sm font-bold text-yellow-500">{item.analysis.alavancagemJogo.entrada}</p>
                           </div>
-                          <div className="bg-emerald-500/10 p-4 rounded-xl border border-emerald-500/20">
-                            <p className="text-[10px] font-bold text-emerald-500/60 uppercase mb-2">Confiança</p>
-                            <p className="text-sm font-black text-emerald-500 tracking-tighter">{item.analysis.confianca || '95% de probabilidade de Green'}</p>
+
+                          {item.analysis.apostaPersonalizada && (
+                            <div className={`md:col-span-3 p-4 rounded-xl border transition-all ${
+                              item.entryStatuses?.apostaPersonalizada === 'hit' ? 'bg-emerald-500/10 border-emerald-500/30' :
+                              item.entryStatuses?.apostaPersonalizada === 'miss' ? 'bg-rose-500/10 border-rose-500/30' :
+                              item.entryStatuses?.apostaPersonalizada === 'void' ? 'bg-amber-500/10 border-amber-500/30' :
+                              'bg-black/40 border-emerald-500/20'
+                            }`}>
+                              <div className="flex items-center justify-between mb-3">
+                                <div className="flex items-center gap-2">
+                                  <Zap className="w-3 h-3 text-emerald-500" />
+                                  <p className="text-[10px] font-bold text-emerald-500 uppercase">Aposta Personalizada Sugerida</p>
+                                </div>
+                                {item.entryStatuses?.apostaPersonalizada && item.entryStatuses.apostaPersonalizada !== 'pending' && (
+                                  <span className={`text-[9px] font-black px-1.5 py-0.5 rounded border ${
+                                    item.entryStatuses.apostaPersonalizada === 'hit' ? 'bg-emerald-500 text-white border-emerald-400' :
+                                    item.entryStatuses.apostaPersonalizada === 'miss' ? 'bg-rose-500 text-white border-rose-400' :
+                                    'bg-amber-500 text-white border-amber-400'
+                                  }`}>
+                                    {item.entryStatuses.apostaPersonalizada === 'hit' ? 'GREEN' : item.entryStatuses.apostaPersonalizada === 'miss' ? 'RED' : 'VOID'}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex flex-wrap gap-2 mb-3">
+                                {item.analysis.apostaPersonalizada.selecoes.map((sel, idx) => (
+                                  <span key={idx} className="text-[9px] bg-white/5 px-2 py-1 rounded border border-white/5 text-white/80">
+                                    {sel}
+                                  </span>
+                                ))}
+                              </div>
+                              <div className="flex justify-between items-center">
+                                <p className="text-xs font-mono font-bold text-emerald-500">Odd Combinada: @{item.analysis.apostaPersonalizada.oddTotal}</p>
+                                <p className="text-[9px] text-white/40 italic">{item.analysis.apostaPersonalizada.justificativa}</p>
+                              </div>
+                            </div>
+                          )}
+                          <div className={`p-4 rounded-xl border transition-all ${
+                            item.status === 'hit' ? 'bg-emerald-500/10 border-emerald-500/20' :
+                            item.status === 'miss' ? 'bg-rose-500/10 border-rose-500/20' :
+                            'bg-white/5 border-white/10'
+                          }`}>
+                            <p className={`text-[10px] font-bold uppercase mb-2 ${
+                              item.status === 'hit' ? 'text-emerald-500/60' :
+                              item.status === 'miss' ? 'text-rose-500/60' :
+                              'text-white/40'
+                            }`}>Confiança</p>
+                            <p className={`text-sm font-black tracking-tighter ${
+                              item.status === 'hit' ? 'text-emerald-500' :
+                              item.status === 'miss' ? 'text-rose-500' :
+                              'text-white/60'
+                            }`}>{item.analysis.confianca || '95% de probabilidade de Green'}</p>
                           </div>
+
+                          {item.postGameAnalysis && (
+                            <div className="md:col-span-3 bg-white/5 border border-white/10 p-4 rounded-xl">
+                              <div className="flex items-center gap-2 mb-2">
+                                <BarChart3 className="w-3 h-3 text-emerald-500" />
+                                <p className="text-[10px] font-bold text-emerald-500 uppercase">Análise Pós-Jogo (Refinamento)</p>
+                              </div>
+                              <p className="text-xs text-white/70 leading-relaxed italic">
+                                {item.postGameAnalysis}
+                              </p>
+                            </div>
+                          )}
                         </div>
                       )}
 
@@ -1471,9 +2268,17 @@ export default function App() {
                           <div className="flex justify-between items-center mb-2">
                             <div className="flex flex-col">
                               <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Jogos no Bilhete</p>
-                              <p className="text-[10px] font-black text-emerald-500 uppercase tracking-widest">{item.multiAnalysis.confianca || '95% de probabilidade de Green'}</p>
+                              <p className={`text-[10px] font-black uppercase tracking-widest ${
+                                item.status === 'hit' ? 'text-emerald-500' :
+                                item.status === 'miss' ? 'text-rose-500' :
+                                'text-white/40'
+                              }`}>{item.multiAnalysis.confianca || '95% de probabilidade de Green'}</p>
                             </div>
-                            <p className="text-xs font-mono font-bold text-emerald-500">Odd Total: @{item.multiAnalysis.oddTotal}</p>
+                            <p className={`text-xs font-mono font-bold ${
+                              item.status === 'hit' ? 'text-emerald-500' :
+                              item.status === 'miss' ? 'text-rose-500' :
+                              'text-white/40'
+                            }`}>Odd Total: @{item.multiAnalysis.oddTotal}</p>
                           </div>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                             {item.multiAnalysis.jogos.map((j, i) => (
@@ -1509,6 +2314,18 @@ export default function App() {
                               </div>
                             ))}
                           </div>
+
+                          {item.postGameAnalysis && (
+                            <div className="bg-white/5 border border-white/10 p-4 rounded-xl">
+                              <div className="flex items-center gap-2 mb-2">
+                                <BarChart3 className="w-3 h-3 text-emerald-500" />
+                                <p className="text-[10px] font-bold text-emerald-500 uppercase">Análise Pós-Jogo (Refinamento)</p>
+                              </div>
+                              <p className="text-xs text-white/70 leading-relaxed italic">
+                                {item.postGameAnalysis}
+                              </p>
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1516,6 +2333,249 @@ export default function App() {
                 ))}
               </div>
             )}
+          </div>
+        )}
+
+        {/* Alavancagem Tab */}
+        {activeTab === 'alavancagem' && (
+          <div className="max-w-4xl mx-auto">
+            <div className="text-center mb-12">
+              <h2 className="text-4xl font-bold mb-4 tracking-tight">Alavancagem de <span className="text-emerald-500">Banca</span></h2>
+              <p className="text-white/60">O jogo mais seguro do mundo hoje, com odd entre 1.50 e 1.80, selecionado por IA.</p>
+            </div>
+
+            <div className="flex justify-center mb-12">
+              <button 
+                onClick={generateLeverageBet}
+                disabled={loading}
+                className="bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-black font-bold px-8 py-4 rounded-2xl transition-all flex items-center gap-3 shadow-xl shadow-emerald-500/20"
+              >
+                {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <TrendingUp className="w-5 h-5" />}
+                {loading ? 'Buscando Oportunidade...' : 'Encontrar Jogo de Alavancagem'}
+              </button>
+            </div>
+
+            {leverageResult && (
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="bg-white/5 border border-emerald-500/30 p-8 rounded-3xl backdrop-blur-xl relative overflow-hidden"
+              >
+                <div className="absolute top-0 right-0 p-6">
+                  <div className="bg-emerald-500 text-black font-black px-4 py-1 rounded-full text-xs uppercase tracking-widest">
+                    Segurança Máxima
+                  </div>
+                </div>
+
+                <div className="mb-8">
+                  <p className="text-emerald-500 font-bold uppercase tracking-widest text-xs mb-2">{leverageResult.liga}</p>
+                  <h3 className="text-3xl font-bold mb-1">{leverageResult.confronto}</h3>
+                  <p className="text-white/40 text-sm">{leverageResult.data} às {leverageResult.horario}</p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+                  <div className="bg-black/40 p-6 rounded-2xl border border-white/5">
+                    <p className="text-white/40 text-[10px] font-bold uppercase mb-2 tracking-widest">Entrada Sugerida</p>
+                    <p className="text-2xl font-bold text-emerald-500">{leverageResult.entrada}</p>
+                    <p className="text-xl font-mono text-white/60 mt-2">Odd @{leverageResult.odd}</p>
+                  </div>
+                  <div className="bg-black/40 p-6 rounded-2xl border border-white/5">
+                    <p className="text-white/40 text-[10px] font-bold uppercase mb-2 tracking-widest">Confiança do Sistema</p>
+                    <p className="text-2xl font-bold text-emerald-500">{leverageResult.confianca}</p>
+                    <p className="text-sm text-white/40 mt-2 italic">Prognóstico de elite sem margem para erro.</p>
+                  </div>
+                </div>
+
+                <div className={`${leverageResult.justificativa.startsWith('AVISO') ? 'bg-amber-500/10 border-amber-500/20' : 'bg-emerald-500/5 border-emerald-500/10'} border p-6 rounded-2xl`}>
+                  <div className="flex items-center gap-2 mb-4">
+                    {leverageResult.justificativa.startsWith('AVISO') ? (
+                      <AlertTriangle className="w-4 h-4 text-amber-500" />
+                    ) : (
+                      <BarChart3 className="w-4 h-4 text-emerald-500" />
+                    )}
+                    <p className={`text-xs font-bold uppercase ${leverageResult.justificativa.startsWith('AVISO') ? 'text-amber-500' : 'text-emerald-500'}`}>
+                      {leverageResult.justificativa.startsWith('AVISO') ? 'Aviso de Segurança' : 'Justificativa Técnica'}
+                    </p>
+                  </div>
+                  <p className={`${leverageResult.justificativa.startsWith('AVISO') ? 'text-amber-200/80' : 'text-white/70'} leading-relaxed italic`}>
+                    {leverageResult.justificativa}
+                  </p>
+                </div>
+              </motion.div>
+            )}
+          </div>
+        )}
+
+        {/* Planilha Tab */}
+        {activeTab === 'planilha' && (
+          <div className="max-w-6xl mx-auto">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-12">
+              <div className="bg-white/5 border border-white/10 p-6 rounded-2xl">
+                <p className="text-white/40 text-[10px] font-bold uppercase mb-1 tracking-widest">Banca Inicial</p>
+                <div className="flex items-center gap-2">
+                  <span className="text-white/40 text-xs">R$</span>
+                  <input 
+                    type="number" 
+                    value={initialBankroll}
+                    onChange={(e) => setInitialBankroll(Number(e.target.value))}
+                    className="bg-transparent text-2xl font-bold w-full focus:outline-none"
+                  />
+                </div>
+              </div>
+              <div className="bg-white/5 border border-white/10 p-6 rounded-2xl">
+                <p className="text-white/40 text-[10px] font-bold uppercase mb-1 tracking-widest">Banca Atual</p>
+                <p className="text-2xl font-bold text-emerald-500">
+                  R$ {(initialBankroll + spreadsheetEntries.reduce((acc, curr) => acc + curr.profit, 0)).toFixed(2)}
+                </p>
+              </div>
+              <div className="bg-white/5 border border-white/10 p-6 rounded-2xl">
+                <p className="text-white/40 text-[10px] font-bold uppercase mb-1 tracking-widest">Lucro Total</p>
+                <p className={`text-2xl font-bold ${spreadsheetEntries.reduce((acc, curr) => acc + curr.profit, 0) >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
+                  R$ {spreadsheetEntries.reduce((acc, curr) => acc + curr.profit, 0).toFixed(2)}
+                </p>
+              </div>
+              <div className="bg-white/5 border border-white/10 p-6 rounded-2xl">
+                <p className="text-white/40 text-[10px] font-bold uppercase mb-1 tracking-widest">ROI (%)</p>
+                <p className="text-2xl font-bold text-emerald-500">
+                  {initialBankroll > 0 ? ((spreadsheetEntries.reduce((acc, curr) => acc + curr.profit, 0) / initialBankroll) * 100).toFixed(1) : 0}%
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-white/5 border border-white/10 rounded-3xl overflow-hidden mb-12">
+              <div className="p-6 border-b border-white/10 flex justify-between items-center bg-black/20">
+                <h3 className="font-bold flex items-center gap-2">
+                  <Table className="w-4 h-4 text-emerald-500" />
+                  Planilha de Gestão
+                </h3>
+                <button 
+                  onClick={() => addSpreadsheetEntry({
+                    date: new Date().toISOString(),
+                    game: 'Novo Jogo',
+                    odd: 1.80,
+                    stake: initialBankroll * 0.05,
+                    status: 'pending'
+                  })}
+                  className="flex items-center gap-2 px-4 py-2 bg-emerald-500 text-black rounded-xl font-bold text-xs hover:bg-emerald-400 transition-all"
+                >
+                  <Plus className="w-3 h-3" />
+                  Nova Entrada
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="text-[10px] font-bold text-white/40 uppercase tracking-widest border-b border-white/5">
+                      <th className="px-6 py-4">Data</th>
+                      <th className="px-6 py-4">Evento</th>
+                      <th className="px-6 py-4">Odd</th>
+                      <th className="px-6 py-4">Stake</th>
+                      <th className="px-6 py-4">Status</th>
+                      <th className="px-6 py-4 text-right">Lucro/Prejuízo</th>
+                      <th className="px-6 py-4 text-right">Ações</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {spreadsheetEntries.map((entry) => (
+                      <tr key={entry.id} className="text-sm hover:bg-white/5 transition-colors group">
+                        <td className="px-6 py-4 text-white/60 font-mono text-xs">
+                          {new Date(entry.date).toLocaleDateString('pt-BR')}
+                        </td>
+                        <td className="px-6 py-4 font-medium">
+                          <input 
+                            type="text" 
+                            value={entry.game}
+                            onChange={(e) => updateDoc(doc(db, 'spreadsheet', entry.id), { game: e.target.value })}
+                            className="bg-transparent focus:outline-none focus:text-emerald-500 transition-colors w-full"
+                          />
+                        </td>
+                        <td className="px-6 py-4 font-mono">
+                          <input 
+                            type="number" 
+                            step="0.01"
+                            value={entry.odd}
+                            onChange={(e) => updateDoc(doc(db, 'spreadsheet', entry.id), { odd: Number(e.target.value) })}
+                            className="bg-transparent focus:outline-none focus:text-emerald-500 transition-colors w-16"
+                          />
+                        </td>
+                        <td className="px-6 py-4 font-mono">
+                          <input 
+                            type="number" 
+                            value={entry.stake}
+                            onChange={(e) => updateDoc(doc(db, 'spreadsheet', entry.id), { stake: Number(e.target.value) })}
+                            className="bg-transparent focus:outline-none focus:text-emerald-500 transition-colors w-20"
+                          />
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="flex items-center gap-2">
+                            <button 
+                              onClick={() => updateSpreadsheetStatus(entry.id, 'hit')}
+                              className={`w-6 h-6 rounded-full flex items-center justify-center transition-all ${entry.status === 'hit' ? 'bg-emerald-500 text-black' : 'bg-white/5 text-white/20 hover:bg-emerald-500/20'}`}
+                            >
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                            </button>
+                            <button 
+                              onClick={() => updateSpreadsheetStatus(entry.id, 'miss')}
+                              className={`w-6 h-6 rounded-full flex items-center justify-center transition-all ${entry.status === 'miss' ? 'bg-red-500 text-white' : 'bg-white/5 text-white/20 hover:bg-red-500/20'}`}
+                            >
+                              <XCircle className="w-3.5 h-3.5" />
+                            </button>
+                            <button 
+                              onClick={() => updateSpreadsheetStatus(entry.id, 'void')}
+                              className={`w-6 h-6 rounded-full flex items-center justify-center transition-all ${entry.status === 'void' ? 'bg-amber-500 text-white' : 'bg-white/5 text-white/20 hover:bg-amber-500/20'}`}
+                            >
+                              <RefreshCw className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                        <td className={`px-6 py-4 text-right font-bold font-mono ${entry.profit > 0 ? 'text-emerald-500' : entry.profit < 0 ? 'text-red-500' : 'text-white/40'}`}>
+                          {entry.profit > 0 ? '+' : ''}{entry.profit.toFixed(2)}
+                        </td>
+                        <td className="px-6 py-4 text-right">
+                          <button 
+                            onClick={() => deleteSpreadsheetEntry(entry.id)}
+                            className="p-2 hover:bg-red-500/10 text-red-400 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                    {spreadsheetEntries.length === 0 && (
+                      <tr>
+                        <td colSpan={7} className="px-6 py-12 text-center text-white/20 italic">
+                          Nenhuma entrada registrada. Comece sua alavancagem agora!
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="bg-emerald-500/5 border border-emerald-500/10 p-8 rounded-3xl">
+              <div className="flex items-center gap-3 mb-6">
+                <Calculator className="w-6 h-6 text-emerald-500" />
+                <h3 className="text-xl font-bold">Gestão de Banca <span className="text-emerald-500">Automática</span></h3>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+                <div className="space-y-2">
+                  <p className="text-sm font-bold text-white/80">Sugestão de Stake (Segura)</p>
+                  <p className="text-2xl font-bold text-emerald-500">R$ {(initialBankroll * 0.02).toFixed(2)}</p>
+                  <p className="text-xs text-white/40">2% da banca inicial para controle de risco rigoroso.</p>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-sm font-bold text-white/80">Sugestão de Stake (Moderada)</p>
+                  <p className="text-2xl font-bold text-emerald-500">R$ {(initialBankroll * 0.05).toFixed(2)}</p>
+                  <p className="text-xs text-white/40">5% da banca inicial para crescimento constante.</p>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-sm font-bold text-white/80">Meta de Alavancagem (Mensal)</p>
+                  <p className="text-2xl font-bold text-emerald-500">R$ {(initialBankroll * 2).toFixed(2)}</p>
+                  <p className="text-xs text-white/40">Dobrar a banca com segurança em 30 dias.</p>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
@@ -1562,6 +2622,7 @@ export default function App() {
           </div>
         </div>
       </footer>
+      <RobotAdvisor message={robotMessage} active={isRobotActive} />
     </div>
     </ErrorBoundary>
   );

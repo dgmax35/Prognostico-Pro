@@ -34,12 +34,32 @@
         }
       },
       "required": ["userId", "game", "date", "analysis", "status", "createdAt"]
+    },
+    "SpreadsheetEntry": {
+      "title": "Spreadsheet Entry",
+      "description": "A row in the user's bankroll management spreadsheet.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "game": { "type": "string" },
+        "odd": { "type": "number" },
+        "stake": { "type": "number" },
+        "status": { "type": "string", "enum": ["hit", "miss", "pending", "void"] },
+        "profit": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "date", "game", "odd", "stake", "status", "profit", "createdAt"]
     }
   },
   "firestore": {
     "/savedAnalyses/{analysisId}": {
       "schema": "SavedAnalysis",
       "description": "Collection of saved football analyses."
+    },
+    "/spreadsheet/{entryId}": {
+      "schema": "SpreadsheetEntry",
+      "description": "Collection of spreadsheet entries for bankroll management."
     }
   }
 }

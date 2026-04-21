@@ -35,6 +35,17 @@ service cloud.firestore {
              data.createdAt is timestamp;
     }
 
+    function isValidSpreadsheetEntry(data) {
+      return data.userId is string &&
+             data.date is string &&
+             data.game is string && data.game.size() > 0 && data.game.size() < 200 &&
+             data.odd is number &&
+             data.stake is number &&
+             data.status in ['pending', 'hit', 'miss', 'void'] &&
+             data.profit is number &&
+             data.createdAt is timestamp;
+    }
+
     match /savedAnalyses/{analysisId} {
       allow read: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid);
       allow create: if isAuthenticated() && 
@@ -44,6 +55,18 @@ service cloud.firestore {
                       resource.data.userId == request.auth.uid &&
                       request.resource.data.userId == request.auth.uid &&
                       isValidAnalysis(request.resource.data);
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+
+    match /spreadsheet/{entryId} {
+      allow read: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid);
+      allow create: if isAuthenticated() && 
+                      request.resource.data.userId == request.auth.uid &&
+                      isValidSpreadsheetEntry(request.resource.data);
+      allow update: if isAuthenticated() && 
+                      resource.data.userId == request.auth.uid &&
+                      request.resource.data.userId == request.auth.uid &&
+                      isValidSpreadsheetEntry(request.resource.data);
       allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
     }
 
