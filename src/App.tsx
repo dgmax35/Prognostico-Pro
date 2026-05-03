@@ -746,7 +746,7 @@ export default function App() {
       toast.success("Login realizado com sucesso!");
     } catch (err) {
       console.error(err);
-      toast.error("Falha ao fazer login.");
+      toast.error("Falha ao fazer login. Verifique se o domínio prognosticodeelite.vercel.app está autorizado no Firebase.");
     }
   };
 
@@ -858,10 +858,10 @@ export default function App() {
   }, [robotChatMessages, isRobotChatOpen]);
 
   const callGeminiWithSearch = async (prompt: string, systemInstruction: string, isJson: boolean = false) => {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = (typeof process !== 'undefined' ? process.env.GEMINI_API_KEY : null) || (import.meta as any).env.VITE_GEMINI_API_KEY;
     if (!apiKey) {
-      console.error("GEMINI_API_KEY não configurada no ambiente.");
-      throw new Error("Erro de Configuração: GEMINI_API_KEY ausente.");
+      console.error("GEMINI_API_KEY não configurada no ambiente. Adicione VITE_GEMINI_API_KEY nas variáveis da Vercel.");
+      throw new Error("Erro de Configuração: GEMINI_API_KEY ausente. Verifique as variáveis de ambiente na Vercel.");
     }
 
     const ai = new GoogleGenAI({ apiKey });
