@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, Component } from 'react';
-import { GoogleGenAI, ThinkingLevel } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import { 
   Search, 
   TrendingUp, 
@@ -31,7 +31,12 @@ import {
   Calculator,
   Plus,
   Bot,
-  Smile
+  Smile,
+  Send,
+  X,
+  MessagesSquare,
+  Crown,
+  Activity
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { auth, db, googleProvider } from './firebase';
@@ -109,17 +114,32 @@ const getDynamicDates = () => {
   const tomorrow = new Date();
   tomorrow.setDate(today.getDate() + 1);
 
+  const months = [
+    'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
+    'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
+  ];
+
   const formatDate = (date: Date) => {
     const d = date.getDate().toString().padStart(2, '0');
     const m = (date.getMonth() + 1).toString().padStart(2, '0');
     const y = date.getFullYear();
-    return `${d}/${m}/${y}`;
+    const monthName = months[date.getMonth()];
+    return {
+      formatted: `${d}/${m}/${y}`,
+      long: `${d} de ${monthName} de ${y}`
+    };
   };
 
+  const todayData = formatDate(today);
+  const tomorrowData = formatDate(tomorrow);
+
   return {
-    today: formatDate(today),
-    tomorrow: formatDate(tomorrow),
-    currentYear: today.getFullYear()
+    today: todayData.formatted,
+    todayLong: todayData.long,
+    tomorrow: tomorrowData.formatted,
+    tomorrowLong: tomorrowData.long,
+    currentYear: today.getFullYear(),
+    currentMonth: months[today.getMonth()]
   };
 };
 
@@ -127,21 +147,84 @@ const validateGameDates = (data: any, type: 'single' | 'multi' | 'leverage'): bo
   const { today, tomorrow, currentYear } = getDynamicDates();
   const currentYearStr = currentYear.toString();
   
-  try {
+  const parseDateAndValidate = (dateStr: string) => {
+    if (!dateStr) return false;
+    
+    // Normalize date string: remove separators, lowercase, replace months with numbers
+    const normalize = (s: string) => {
+      let res = s.toLowerCase()
+        .replace(/jan(?:eiro)?/g, '01')
+        .replace(/fev(?:ereiro)?/g, '02')
+        .replace(/mar(?:ço)?/g, '03')
+        .replace(/abr(?:il)?/g, '04')
+        .replace(/mai(?:o)?/g, '05')
+        .replace(/jun(?:ho)?/g, '06')
+        .replace(/jul(?:ho)?/g, '07')
+        .replace(/ago(?:sto)?/g, '08')
+        .replace(/set(?:embro)?/g, '09')
+        .replace(/out(?:ubro)?/g, '10')
+        .replace(/nov(?:embro)?/g, '11')
+        .replace(/dez(?:embro)?/g, '12')
+        .replace(/[\/-]/g, '')
+        .replace(/\s+/g, '')
+        .replace(/de/g, '')
+        .trim();
+      return res;
+    };
+
+    const normalizedInput = normalize(dateStr);
+    
+    // Today and Tomorrow info
+    const { today, tomorrow, currentYear } = getDynamicDates();
+    const currentYearStr = currentYear.toString();
+    const currentYearShort = currentYearStr.substring(2);
+
+    const getParts = (dStr: string) => {
+      const parts = dStr.split('/');
+      return {
+        day: parts[0],
+        month: parts[1],
+        year: parts[2]
+      };
+    };
+
+    const t = getParts(today);
+    const tm = getParts(tomorrow);
+
+    const check = (p: {day: string, month: string, year: string}) => {
+      // Check for "Hoje", "Today", "Amanhã", "Tomorrow" (case insensitive)
+      const isRelativeDate = /hoje|today|amanhã|tomorrow/i.test(dateStr);
+      if (isRelativeDate) return true;
+
+      // Check for day+month (e.g. 0105) and year (2026 or 26)
+      const hasDayMonth = normalizedInput.includes(p.day + p.month) || 
+                         normalizedInput.includes(parseInt(p.day).toString() + p.month) ||
+                         normalizedInput.includes(p.day + parseInt(p.month).toString()) ||
+                         normalizedInput.includes(parseInt(p.day).toString() + parseInt(p.month).toString());
+      
+      const hasYear = normalizedInput.includes(p.year) || normalizedInput.includes(currentYearShort);
+      
+      // If year is present, it MUST be the current year
+      if (normalizedInput.includes('2024') || normalizedInput.includes('2025')) {
+        return false;
+      }
+
+      return hasDayMonth && (hasYear || !normalizedInput.match(/\d{4}/)); // If no 4-digit year, assume current if day/month matches
+    };
+
+    return check(t) || check(tm);
+  };
+
+    try {
+    if (!data) return false;
+    
     if (type === 'single' || type === 'leverage') {
-      const gameDate = data.data; 
-      if (!gameDate) return false;
-      if (!gameDate.includes(currentYearStr)) return false;
-      return gameDate.includes(today) || gameDate.includes(tomorrow);
+      return parseDateAndValidate(data.data);
     }
     
     if (type === 'multi') {
       if (!data.jogos || !Array.isArray(data.jogos)) return false;
-      return data.jogos.every((j: any) => {
-        if (!j.data) return false;
-        if (!j.data.includes(currentYearStr)) return false;
-        return j.data.includes(today) || j.data.includes(tomorrow);
-      });
+      return data.jogos.every((j: any) => parseDateAndValidate(j.data));
     }
   } catch (e) {
     return false;
@@ -149,10 +232,87 @@ const validateGameDates = (data: any, type: 'single' | 'multi' | 'leverage'): bo
   return true;
 };
 
-// Helper to safely parse JSON from AI response
+// Helper to safely parse JSON from AI response with repair capabilities
 const safeJsonParse = (text: string) => {
+  const tryRepairJson = (json: string) => {
+    let repaired = json.trim();
+    
+    // Basic structural repairs for truncated objects/arrays
+    const stack: string[] = [];
+    let inString = false;
+    let escaped = false;
+
+    for (let i = 0; i < repaired.length; i++) {
+        const char = repaired[i];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (char === '\\') {
+            escaped = true;
+            continue;
+        }
+        if (char === '"') {
+            inString = !inString;
+            continue;
+        }
+        if (inString) continue;
+
+        if (char === '{' || char === '[') {
+            stack.push(char);
+        } else if (char === '}') {
+            if (stack[stack.length - 1] === '{') stack.pop();
+        } else if (char === ']') {
+            if (stack[stack.length - 1] === '[') stack.pop();
+        }
+    }
+
+    if (inString) {
+        // Handle trailing backslash that would escape our closing quote
+        if (repaired.endsWith('\\') && !repaired.endsWith('\\\\')) {
+            repaired = repaired.slice(0, -1);
+        }
+        repaired += '"';
+    }
+    
+    // Clean up trailing separators and incomplete keys/values
+    repaired = repaired.trim();
+    
+    // Iteratively remove trailing illegal characters and incomplete object properties
+    let previousRepaired = '';
+    while (repaired !== previousRepaired) {
+        previousRepaired = repaired;
+        
+        // Remove trailing commas, colons, and whitespace
+        repaired = repaired.replace(/[,:\s]+$/, '').trim();
+        
+        // Handle truncated property names: if we end with a quote, check if it's a key without a value
+        if (repaired.endsWith('"')) {
+            const lastQuoteIdx = repaired.lastIndexOf('"', repaired.length - 2);
+            if (lastQuoteIdx !== -1) {
+                // If the character before the start of the quoted string is '{' or ',', 
+                // it's likely a property name without a value yet.
+                const beforeQuoted = repaired.substring(0, lastQuoteIdx).trim();
+                if (beforeQuoted.endsWith('{') || beforeQuoted.endsWith(',')) {
+                    repaired = beforeQuoted;
+                }
+            }
+        }
+    }
+    
+    while (stack.length > 0) {
+        const last = stack.pop();
+        if (last === '{') {
+            repaired = repaired.trim().replace(/,$/, '') + '}';
+        } else if (last === '[') {
+            repaired = repaired.trim().replace(/,$/, '') + ']';
+        }
+    }
+    
+    return repaired;
+  };
+
   try {
-    // Clean potential markdown or extra text
     let cleaned = text.trim();
     if (cleaned.startsWith('```json')) {
       cleaned = cleaned.replace(/^```json\n?/, '').replace(/\n?```$/, '');
@@ -160,18 +320,73 @@ const safeJsonParse = (text: string) => {
       cleaned = cleaned.replace(/^```\n?/, '').replace(/\n?```$/, '');
     }
     
-    // Find the first { and the last }
     const firstBrace = cleaned.indexOf('{');
-    const lastBrace = cleaned.lastIndexOf('}');
+    const firstBracket = cleaned.indexOf('[');
+    let startIdx = -1;
+    let endChar = '';
     
-    if (firstBrace !== -1 && lastBrace !== -1) {
-      cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+    if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
+      startIdx = firstBrace;
+      endChar = '}';
+    } else if (firstBracket !== -1) {
+      startIdx = firstBracket;
+      endChar = ']';
     }
     
-    return JSON.parse(cleaned);
+    if (startIdx === -1) throw new Error("JSON não encontrado");
+    
+    // Attempt to find the balanced closing character to ignore trailing garbage
+    let jsonPart = cleaned.substring(startIdx);
+    const startChar = cleaned[startIdx];
+    let balance = 0;
+    let inString = false;
+    let escaped = false;
+    let actualEndIdx = -1;
+
+    for (let i = 0; i < jsonPart.length; i++) {
+        const char = jsonPart[i];
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === '\\') {
+          escaped = true;
+          continue;
+        }
+        if (char === '"') {
+          inString = !inString;
+          continue;
+        }
+        if (inString) continue;
+
+        if (char === startChar) {
+          balance++;
+        } else if (char === endChar) {
+          balance--;
+          if (balance === 0) {
+            actualEndIdx = i;
+            break;
+          }
+        }
+    }
+
+    if (actualEndIdx !== -1) {
+      jsonPart = jsonPart.substring(0, actualEndIdx + 1);
+    } else {
+      // If we didn't find a balance, try to trim any non-JSON characters at the end
+      jsonPart = jsonPart.trim().replace(/[^{}\[\]]*$/, '');
+    }
+
+    try {
+      return JSON.parse(jsonPart.trim());
+    } catch (initialError) {
+      // Try to repair truncated JSON
+      const repaired = tryRepairJson(jsonPart.trim());
+      return JSON.parse(repaired);
+    }
   } catch (e) {
     console.error("JSON Parse Error:", e, "Original text:", text);
-    throw new Error("Falha ao processar os dados da análise. Tente novamente.");
+    throw new Error("Falha ao processar os dados da análise. O conteúdo foi muito longo ou malformado. Tente novamente.");
   }
 };
 
@@ -261,6 +476,14 @@ interface AnalysisResult {
         t1: string;
         t2: string;
       };
+    };
+    mestreDeElite?: {
+      analiseProfunda: string;
+      confrontoDireto: string;
+      ultimosJogos: string;
+      predicaoAbsoluta: string;
+      eventosGarantidos: string[];
+      oddJustificada: string;
     };
 }
 
@@ -379,49 +602,6 @@ class ErrorBoundary extends (React.Component as any) {
   }
 }
 
-const RobotAdvisor = ({ message, active }: { message: string, active: boolean }) => (
-  <AnimatePresence>
-    {active && (
-      <motion.div
-        initial={{ opacity: 0, scale: 0.8, y: 20 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.8, y: 20 }}
-        className="fixed bottom-8 right-8 z-[100] flex flex-col items-end gap-3 pointer-events-none"
-      >
-        <motion.div 
-          initial={{ opacity: 0, x: 20 }}
-          animate={{ opacity: 1, x: 0 }}
-          className="bg-emerald-500 text-black p-5 rounded-[2rem] rounded-br-none shadow-2xl max-w-[280px] text-sm font-black border-2 border-white/20 relative pointer-events-auto"
-        >
-          <div className="absolute -bottom-2 right-0 w-4 h-4 bg-emerald-500 rotate-45" />
-          <div className="flex items-start gap-3">
-            <span className="shrink-0 text-2xl font-bold">🤖</span>
-            <p className="leading-tight">{message}</p>
-          </div>
-        </motion.div>
-        <div className="w-20 h-20 bg-emerald-500 rounded-full flex items-center justify-center shadow-xl border-4 border-white/20 relative pointer-events-auto hover:scale-110 transition-transform group cursor-pointer overflow-hidden">
-          <div className="absolute inset-0 bg-gradient-to-tr from-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-          <motion.div
-            animate={{ 
-              rotate: [0, -10, 10, -10, 0],
-              y: [0, -5, 0, -5, 0]
-            }}
-            transition={{ repeat: Infinity, duration: 4 }}
-          >
-            <Bot className="w-12 h-12 text-black" />
-          </motion.div>
-          <motion.div 
-            animate={{ scale: [1, 1.2, 1] }}
-            transition={{ repeat: Infinity, duration: 2 }}
-            className="absolute -top-1 -right-1 w-7 h-7 bg-black rounded-full flex items-center justify-center border-2 border-emerald-500 shadow-lg"
-          >
-             <Smile className="w-4 h-4 text-emerald-500" />
-          </motion.div>
-        </div>
-      </motion.div>
-    )}
-  </AnimatePresence>
-);
 
 export default function App() {
   const [game, setGame] = useState('');
@@ -431,6 +611,12 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [robotMessage, setRobotMessage] = useState('');
   const [isRobotActive, setIsRobotActive] = useState(false);
+  const [isRobotChatOpen, setIsRobotChatOpen] = useState(false);
+  const [robotChatMessages, setRobotChatMessages] = useState<{ role: 'user' | 'assistant', content: string }[]>([
+    { role: 'assistant', content: "Olá! Sou o seu Assistente de Elite. Como posso ajudar com suas decisões de hoje? 🤖✨" }
+  ]);
+  const [chatInput, setChatInput] = useState('');
+  const [isChatLoading, setIsChatLoading] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [multiResult, setMultiResult] = useState<MultiBetResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -445,7 +631,9 @@ export default function App() {
 
   const markets = [
     'Resultado Final',
+    'Dupla Chance 1X2',
     'Gols (Over/Under)',
+    'Gols Over/Under - HT',
     'Ambas Marcam',
     'Escanteios',
     'Cartões',
@@ -615,7 +803,7 @@ export default function App() {
         type: 'multi',
         status: 'pending',
         entryStatuses: {
-          multi: multiResult.jogos.map(() => 'pending')
+          multi: multiResult.jogos?.map(() => 'pending') || []
         },
         createdAt: serverTimestamp()
       });
@@ -630,16 +818,13 @@ export default function App() {
     if (status === 'pending' || status === 'void') return null;
     
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const model = "gemini-3-flash-preview";
-      
       const prompt = `
         Você é um analista esportivo sênior. Analise o resultado do jogo "${item.game}" que foi marcado como "${status.toUpperCase()}".
         
         CONTEXTO DA ANÁLISE PRÉ-JOGO:
         - Liga: ${item.analysis?.liga || (item.multiAnalysis?.jogos && item.multiAnalysis.jogos[0]?.liga) || 'N/A'}
-        - Prognóstico: ${item.analysis?.prognosticoPrincipal.entrada || 'Múltipla'}
-        - Justificativa: ${item.analysis?.prognosticoPrincipal.justificativa || item.multiAnalysis?.analiseGeral || 'N/A'}
+        - Prognóstico: ${item.analysis?.prognosticoPrincipal?.entrada || 'Múltipla'}
+        - Justificativa: ${item.analysis?.prognosticoPrincipal?.justificativa || item.multiAnalysis?.analiseGeral || 'N/A'}
         
         SUA MISSÃO:
         1. Use o Google Search para entender o que aconteceu no jogo (placar, expulsões, lesões, volume de jogo).
@@ -651,21 +836,248 @@ export default function App() {
         Responda em um parágrafo direto e técnico (máximo 500 caracteres).
       `;
 
-      const response = await ai.models.generateContent({
-        model: model,
-        contents: prompt,
-        config: {
-          systemInstruction: "Você é um analista de performance esportiva focado em melhoria contínua. Sua análise deve ser baseada em fatos reais do jogo.",
-          tools: [{ googleSearch: {} }]
-        }
-      });
+      const response = await callGeminiWithSearch(
+        prompt,
+        "Você é um analista de performance esportiva focado em melhoria contínua. Sua análise deve ser baseada em fatos reais do jogo.",
+        false
+      );
 
-      return response.text;
+      return response.text || '';
     } catch (err) {
       console.error("Erro ao gerar análise pós-jogo:", err);
       return null;
     }
   };
+
+  const chatScrollRef = React.useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (chatScrollRef.current) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+    }
+  }, [robotChatMessages, isRobotChatOpen]);
+
+  const callGeminiWithSearch = async (prompt: string, systemInstruction: string, isJson: boolean = false) => {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      console.error("GEMINI_API_KEY não configurada no ambiente.");
+      throw new Error("Erro de Configuração: GEMINI_API_KEY ausente.");
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
+    // Usando 'gemini-flash-latest' que garante o modelo Flash mais estável e compatível
+    const modelName = "gemini-flash-latest";
+    
+    const tryGenerate = async (useSearch: boolean) => {
+      const request: any = {
+        model: modelName,
+        contents: prompt,
+        config: {
+          systemInstruction,
+          maxOutputTokens: 8192,
+          temperature: 0.1, // Máxima precisão conforme desejado
+          ...(isJson ? { responseMimeType: "application/json" } : {}),
+          // Inclui ferramentas no objeto de configuração
+          tools: useSearch ? [{ googleSearch: {} }] : undefined,
+        }
+      };
+      
+      return await ai.models.generateContent(request);
+    };
+
+    try {
+      // Primeira tentativa: Modo Completo com Grounding (Busca em Tempo Real)
+      return await tryGenerate(true);
+    } catch (err: any) {
+      const errorMsg = String(err).toLowerCase();
+      // Captura erros de permissão (403), cota (429) ou problemas específicos do Search
+      if (
+        errorMsg.includes('403') || 
+        errorMsg.includes('permission') || 
+        errorMsg.includes('429') ||
+        errorMsg.includes('quota') ||
+        errorMsg.includes('not permitted')
+      ) {
+        console.warn("Detectada restrição de API/Search. Ativando modo de segurança 'High-Performance Brain Only'.");
+        try {
+          // Segunda tentativa: Garantia de funcionamento sem dependência de Search
+          return await tryGenerate(false);
+        } catch (fallbackErr) {
+          console.error("Falha Crítica no motor de IA:", fallbackErr);
+          throw fallbackErr;
+        }
+      }
+      throw err;
+    }
+  };
+
+  const handleRobotChat = async () => {
+    if (!chatInput.trim() || isChatLoading) return;
+
+    const userMessage = chatInput.trim();
+    setChatInput('');
+    setRobotChatMessages(prev => [...prev, { role: 'user', content: userMessage }]);
+    setIsChatLoading(true);
+
+    try {
+      const chatContext = {
+        activeTab,
+        currentGame: game,
+        currentResult: result ? result.confronto : 'Nenhuma análise ativa',
+        hasUser: !!user,
+        historyCount: history.length
+      };
+
+      const systemPrompt = `
+        Você é o Assistente de Elite do FutAnalytix Pro. 🤖✨
+        Sua personalidade é prestativa, técnica, otimista e focada em resultados.
+        Sua missão é ajudar o usuário em qualquer parte do sistema, tirando dúvidas sobre ferramentas, jogos ou estratégias.
+        
+        CONTEXTO DO SISTEMA AGORA:
+        - Aba ativa: ${chatContext.activeTab}
+        - Jogo em foco: ${chatContext.currentGame}
+        - Resultados recentes salvos: ${chatContext.historyCount}
+        
+        INSTRUÇÕES:
+        1. Ajude o usuário a tomar decisões baseadas em lógica.
+        2. Explique como funciona a alavancagem, arquiteto de bilhetes ou planilha se ele perguntar.
+        3. Se ele pedir opinião sobre um jogo, use seu conhecimento para dar um insight técnico (validando via Google Search se necessário).
+        4. Seja amigável e use o estilo do robô do FutAnalytix.
+      `;
+
+      const resultAi = await callGeminiWithSearch(
+        `Usuário diz: ${userMessage}`,
+        systemPrompt,
+        false
+      );
+
+      const assistantMessage = resultAi.text;
+      setRobotChatMessages(prev => [...prev, { role: 'assistant', content: assistantMessage || "Desculpe, não consegui processar sua mensagem." }]);
+    } catch (err) {
+      console.error(err);
+      setRobotChatMessages(prev => [...prev, { role: 'assistant', content: "Desculpe, tive um erro de processamento. Pode tentar de novo? 🤖⚠️" }]);
+    } finally {
+      setIsChatLoading(false);
+    }
+  };
+
+  const interactiveRobot = (
+    <div className="fixed bottom-8 right-8 z-[100] flex flex-col items-end pointer-events-none">
+      <AnimatePresence>
+        {isRobotChatOpen && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.9, y: 20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.9, y: 20 }}
+            className="mb-4 w-[350px] max-w-[90vw] h-[500px] bg-[#0A0A0A] border-2 border-emerald-500/30 rounded-3xl overflow-hidden shadow-2xl pointer-events-auto flex flex-col"
+          >
+            <div className="bg-emerald-500/10 p-4 border-b border-white/10 flex items-center justify-between">
+              <div className="flex items-center gap-2 font-bold text-emerald-500 text-sm">
+                <Bot className="w-4 h-4" />
+                <span>CONSULTOR DE ELITE</span>
+              </div>
+              <button 
+                onClick={() => setIsRobotChatOpen(false)}
+                className="p-1 hover:bg-white/10 rounded-full transition-colors"
+              >
+                <X className="w-4 h-4 text-white/40" />
+              </button>
+            </div>
+            
+            <div 
+              ref={chatScrollRef}
+              className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-hide"
+            >
+              {robotChatMessages.map((msg, idx) => (
+                <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[85%] p-3 rounded-2xl text-xs leading-relaxed ${
+                    msg.role === 'user' 
+                      ? 'bg-emerald-500 text-black font-bold' 
+                      : 'bg-white/5 border border-white/10 text-white/80'
+                  }`}>
+                    {msg.content}
+                  </div>
+                </div>
+              ))}
+              {isChatLoading && (
+                <div className="flex justify-start">
+                  <div className="bg-white/5 border border-white/10 p-3 rounded-2xl">
+                    <Loader2 className="w-4 h-4 animate-spin text-emerald-500" />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 bg-white/5 border-t border-white/10">
+              <div className="relative">
+                <input 
+                  type="text"
+                  placeholder="Pergunte qualquer coisa..."
+                  className="w-full bg-black/40 border border-white/10 rounded-xl py-3 pl-4 pr-12 focus:outline-none focus:border-emerald-500/50 text-xs"
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleRobotChat()}
+                />
+                <button 
+                  onClick={handleRobotChat}
+                  disabled={!chatInput.trim() || isChatLoading}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-emerald-500 disabled:text-white/10 hover:scale-110 transition-transform"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <div className="flex flex-col items-end gap-3 pointer-events-auto">
+        <AnimatePresence>
+          {isRobotActive && !isRobotChatOpen && (
+            <motion.div 
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 20 }}
+              className="bg-emerald-500 text-black p-4 rounded-3xl rounded-br-none shadow-2xl max-w-[280px] text-xs font-black border-2 border-white/20 relative"
+            >
+              <div className="absolute -bottom-2 right-0 w-3 h-3 bg-emerald-500 rotate-45" />
+              <div className="flex items-start gap-2">
+                <span className="shrink-0">🤖</span>
+                <p>{robotMessage}</p>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <motion.div 
+          onClick={() => setIsRobotChatOpen(!isRobotChatOpen)}
+          whileHover={{ scale: 1.1 }}
+          whileTap={{ scale: 0.9 }}
+          className="w-16 h-16 bg-emerald-500 rounded-full flex items-center justify-center shadow-xl border-4 border-white/20 relative cursor-pointer overflow-hidden group"
+        >
+          <div className="absolute inset-0 bg-gradient-to-tr from-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+          <motion.div
+            animate={{ 
+              rotate: [0, -10, 10, -10, 0],
+              y: [0, -5, 0, -5, 0]
+            }}
+            transition={{ repeat: Infinity, duration: 4 }}
+          >
+            {isRobotChatOpen ? <X className="w-7 h-7 text-black font-bold" /> : <Bot className="w-9 h-9 text-black" />}
+          </motion.div>
+          {!isRobotChatOpen && (
+            <motion.div 
+              animate={{ scale: [1, 1.2, 1] }}
+              transition={{ repeat: Infinity, duration: 2 }}
+              className="absolute -top-1 -right-1 w-6 h-6 bg-black rounded-full flex items-center justify-center border-2 border-emerald-500 shadow-lg"
+            >
+              <MessagesSquare className="w-3 h-3 text-emerald-500" />
+            </motion.div>
+          )}
+        </motion.div>
+      </div>
+    </div>
+  );
 
   const updateStatus = async (id: string, status: 'hit' | 'miss' | 'void' | 'pending') => {
     try {
@@ -720,9 +1132,6 @@ export default function App() {
     setSyncing(true);
     lastSyncRef.current = now;
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const model = "gemini-3-flash-preview";
-
       const gamesToSync = pendingItems.map(item => ({
         id: item.id,
         game: item.game,
@@ -730,12 +1139,12 @@ export default function App() {
         type: item.type,
         entradas: item.type === 'single' 
           ? {
-              principal: item.analysis?.prognosticoPrincipal.entrada,
-              segura: item.analysis?.prognosticoPrincipal.entradaSegura.mercado,
-              alavancagem: item.analysis?.alavancagemJogo.entrada,
-              apostaPersonalizada: item.analysis?.apostaPersonalizada.selecoes.join(' + ')
+              principal: item.analysis?.prognosticoPrincipal?.entrada,
+              segura: item.analysis?.prognosticoPrincipal?.entradaSegura?.mercado,
+              alavancagem: item.analysis?.alavancagemJogo?.entrada,
+              apostaPersonalizada: item.analysis?.apostaPersonalizada?.selecoes?.join(' + ')
             }
-          : item.multiAnalysis?.jogos.map(j => j.entrada)
+          : item.multiAnalysis?.jogos?.map(j => j.entrada)
       }));
 
       setRobotMessage(`Auditando ${pendingItems.length} eventos pendentes via Google Search... 🌍🤖`);
@@ -774,21 +1183,13 @@ export default function App() {
         ]
       `;
 
-      const response = await ai.models.generateContent({
-        model: model,
-        contents: prompt,
-        config: {
-          systemInstruction: "Você é um auditor de resultados esportivos preciso e imparcial. Você usa o Google Search para verificar fatos e resultados reais de partidas de futebol. Sua auditoria é a verdade absoluta do sistema. Responda apenas com o JSON puro, sem blocos de código ou explicações.",
-          tools: [{ googleSearch: {} }],
-          responseMimeType: "application/json"
-        }
-      });
+      const response = await callGeminiWithSearch(
+        prompt,
+        "Você é um auditor de resultados esportivos preciso e imparcial. Você usa o Google Search para verificar fatos e resultados reais de partidas de futebol. Sua auditoria é a verdade absoluta do sistema. Responda apenas com o JSON puro, sem blocos de código ou explicações.",
+        true
+      );
 
-      let cleanText = response.text || '[]';
-      // Remove potential markdown code blocks
-      cleanText = cleanText.replace(/```json\n?/, '').replace(/```\n?/, '').trim();
-      
-      const results = JSON.parse(cleanText);
+      const results = safeJsonParse(response.text || '[]');
       for (const res of results) {
         if (res.id) {
           const item = pendingItems.find(p => p.id === res.id);
@@ -853,19 +1254,19 @@ export default function App() {
     setIsRobotActive(true);
     setRobotMessage("Iniciando Alavancagem de Elite! Estou buscando os jogos mais seguros de hoje para você faturar! 🚀🤖");
 
-    const { today, tomorrow, currentYear } = getDynamicDates();
+    const { today, todayLong, tomorrow, tomorrowLong, currentYear, currentMonth } = getDynamicDates();
     const now = new Date();
     const timeStr = now.toLocaleTimeString('pt-BR');
 
     const performLeverage = async (attempt = 0): Promise<void> => {
       try {
         setRobotMessage(`Cruzando dados de forma e motivação para garantir o Green (${attempt + 1})... 🎯✨`);
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        const model = "gemini-3-flash-preview";
 
         const prompt = `
           Você é o ANALISTA CHEFE DE ALAVANCAGEM DE BANCA. Sua reputação é baseada em NUNCA ter um RED na alavancagem.
-          DATA DO JOGO: ${today}
+          DATA DO JOGO: ${todayLong}
+          MES ATUAL: ${currentMonth}
+          ANO ATUAL: ${currentYear}
           HORA ATUAL (BRASÍLIA): ${timeStr}
 
           MISSÃO: Encontrar a entrada MAIS ÓBVIA, SEGURA E MATEMATICAMENTE PROVÁVEL do planeta hoje.
@@ -873,14 +1274,15 @@ export default function App() {
           DIRETRIZES DE SEGURANÇA MÁXIMA (TOLERÂNCIA ZERO):
           0. COERÊNCIA TOTAL: Todas as informações do prognóstico devem ser consistentes. Se a justificativa aponta superioridade do Time A, a entrada não pode ser a favor do Time B.
           1. ODD: Deve estar RIGOROSAMENTE entre 1.50 e 1.80.
-          2. HORÁRIO: O jogo deve ocorrer DEPOIS das ${timeStr} de hoje.
+          2. HORÁRIO: O jogo deve ocorrer DEPOIS das ${timeStr} de hoje (${todayLong}).
           3. MERCADOS PERMITIDOS: Priorize mercados conservadores como "Dupla Chance", "Empate Anula", "Over 1.5 Gols" (em ligas de alta média), ou "Vitória" de favoritos ABSOLUTOS em casa com escalação completa.
-          3. FILTRO DE "ZEBRA": Use o Google Search para verificar se o favorito tem desfalques (lesões/suspensões), se o jogo é amistoso (EVITE AMISTOSOS), ou se o time não tem motivação (ex: já campeão ou já rebaixado).
-          4. HISTÓRICO: O confronto deve ter um padrão claro de dominância ou tendência estatística que se repete há pelo menos 5 jogos.
-          5. CONFIANÇA: Só retorne o jogo se a probabilidade matemática e contextual for superior a 99%. Se não houver nenhum jogo com esse nível de segurança hoje, retorne um erro no campo "justificativa" começando com "AVISO: Nenhum jogo atingiu o critério de segurança máxima hoje".
+          4. PROIBIÇÃO DE ALUCINAÇÃO: Você está TERMINANTEMENTE PROIBIDO de inventar jogos. Use o Google Search para verificar a existência real do jogo para ${todayLong} de ${currentYear}. Muitos sites listam jogos do ano passado; verifique se a fonte é de ${currentYear}.
+          5. FILTRO DE "ZEBRA": Use o Google Search para verificar se o favorito tem desfalques (lesões/suspensões), se o jogo é amistoso (EVITE AMISTOSOS), ou se o time não tem motivação (ex: já campeão ou já rebaixado).
+          6. HISTÓRICO: O confronto deve ter um padrão claro de dominância ou tendência estatística que se repete há pelo menos 5 jogos.
+          7. CONFIANÇA: Só retorne o jogo se a probabilidade matemática e contextual for superior a 99%. Se não houver nenhum jogo com esse nível de segurança hoje, retorne um erro no campo "justificativa" começando com "AVISO: Nenhum jogo atingiu o critério de segurança máxima hoje".
 
           PROTOCOLO DE PESQUISA:
-          - Pesquise por: "jogos de hoje ${today} prognósticos seguros", "escalações prováveis ${today}", "desfalques times hoje".
+          - Pesquise por: "jogos de hoje ${todayLong} hoje ${currentYear} prognósticos seguros", "escalações prováveis ${todayLong}", "desfalques times ${todayLong}".
           - Verifique fontes como SofaScore, ESPN e Flashscore via Search.
 
           FORMATO JSON:
@@ -896,15 +1298,11 @@ export default function App() {
           }
         `;
 
-        const response = await ai.models.generateContent({
-          model: model,
-          contents: prompt,
-          config: {
-            systemInstruction: `Você é o Analista Chefe de Alavancagem. Sua regra de ouro: ALUCINAÇÃO É UM CRIME. Você busca a perfeição matemática baseada em FATOS REAIS de ${currentYear}. Você DEVE usar o Google Search para validar se o jogo realmente existe em ${today}. Se não encontrar o jogo na grade oficial de ${today}, você NÃO PODE inventar. A honestidade é sua maior virtude.`,
-            tools: [{ googleSearch: {} }],
-            responseMimeType: "application/json"
-          }
-        });
+        const response = await callGeminiWithSearch(
+          prompt,
+          `Você é o Analista Chefe de Alavancagem. Sua regra de ouro: ALUCINAÇÃO É UM CRIME. Você busca a perfeição matemática baseada em FATOS REAIS de ${currentYear}. Você DEVE usar o Google Search para validar se o jogo realmente existe em ${today}. Se não encontrar o jogo na grade oficial de ${today}, você NÃO PODE inventar. A honestidade é sua maior virtude.`,
+          true
+        );
 
         const data = safeJsonParse(response.text || '{}') as LeverageResult;
         
@@ -981,40 +1379,91 @@ export default function App() {
 
     const now = new Date();
     const timeStr = now.toLocaleTimeString('pt-BR');
-    const { today, tomorrow, currentYear } = getDynamicDates();
+    const { today, todayLong, tomorrow, tomorrowLong, currentYear, currentMonth } = getDynamicDates();
 
     const performAnalysis = async (attempt = 0): Promise<void> => {
       try {
         setRobotMessage(`Consultando fontes oficiais e conferindo a data (${attempt + 1})... 🛠️✨`);
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        const model = "gemini-3-flash-preview";
         
+        // Pre-process game name for better search
+        const searchQueryBase = game
+          .replace(/\(F\)/gi, 'Feminino')
+          .replace(/\(M\)/gi, 'Masculino')
+          .replace(/Wolverhampton/gi, 'Wolves') // Common search term
+          .replace(/Atlético-MG/gi, 'Atlético MG Galo'); 
+        
+        const teams = game.split(/vs|x/i).map(s => s.trim());
+        const shortNames = teams.map(t => {
+          if (t.toLowerCase().includes('wolverhampton')) return 'Wolves';
+          if (t.toLowerCase().includes('atlético-mg')) return 'Galo';
+          if (t.toLowerCase().includes('fluminense')) return 'Flu';
+          if (t.toLowerCase().includes('flamengo')) return 'Fla';
+          return t.split(' ')[0];
+        });
+        const shortName = shortNames.join(' vs ');
+        const team1 = teams[0] || '';
+        const team2 = teams[1] || '';
+
         const prompt = `
           Você é o MAIOR ANALISTA ESTATÍSTICO E TRADER ESPORTIVO DO MUNDO. Sua palavra é a referência global em prognósticos.
           DATA ATUAL (UTC): ${new Date().toISOString()}
-          DATA LOCAL ESTIMADA: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}
+          DATA LOCAL ESTIMADA: ${todayLong}
+          MES ATUAL: ${currentMonth}
+          ANO ATUAL: ${currentYear}
           HORA ATUAL: ${timeStr}
 
           Sua missão é analisar o jogo: "${game}" com uma odd alvo de "${desiredOdd}".
 
-          PROTOCOLO DE VERIFICAÇÃO DE EXISTÊNCIA E DATA:
-          1. Use o Google Search para buscar por "${game} ${today} ${currentYear}", "${game} fixtures 2026", "${game} live score 2026" ou "${game} próximo jogo 2026" para confirmar se o jogo realmente existe e está agendado para HOJE (${today}) ou AMANHÃ (${tomorrow}) do ano de ${currentYear}.
-          2. É PROIBIDO usar dados de 2024 ou 2025. Se o jogo não for de ${currentYear}, ele não existe para este sistema.
-          3. Se o jogo for HOJE ou AMANHÃ de ${currentYear}, prossiga com a análise completa e detalhada.
-          4. Se você não encontrar NENHUMA evidência do jogo nas datas de ${today} ou ${tomorrow} de ${currentYear} após várias buscas, retorne o erro no campo "analiseJogo.expectativa": "ERRO: Este jogo não consta na grade oficial de hoje (${today}/${currentYear}). Verifique o nome e a data ou tente ser mais específico (ex: Time A vs Time B)."
-          5. Seja flexível com variações no nome das equipes e ligas, mas RÍGIDO com a data e o ano (${currentYear}).
-          6. NUNCA INVENTE RESULTADOS OU JOGOS.
+          PROTOCOLO DE VERIFICAÇÃO DE EXISTÊNCIA E DATA (GROUNDING):
+          1. EXECUTE MÚLTIPLAS BUSCAS DE EXTREMA PRECISÃO:
+             - Busca A: "${searchQueryBase} ${todayLong} ${currentYear}" (Busca exata do ano)
+             - Busca B: "${shortName} hoje placar" (Busca por apelidos e placar ao vivo)
+             - Busca C: "${team1} hoje", "${team2} hoje" (Buscas individuais por rodada atual)
+             - Busca D: "${searchQueryBase} sofascore", "${searchQueryBase} flashscore", "${searchQueryBase} hltv" (Busca em sites de referência futebol/eSports)
+          
+          2. IMPORTANTE (RECONHECIMENTO DE NOMES):
+             - Seja inteligente com apelidos: "Wolves" é "Wolverhampton", "Spurs" é "Tottenham", "Galo" é "Atlético-MG", "Peixe" é "Santos", etc.
+             - eSports: "Vitality", "FaZe", "NaVi", "G2" são equipes de CS2. Busque por "HLTV" para resultados de hoje.
+             - Se a busca por "${game}" falhar, tente os nomes curtos e valide se a competição é a mesma.
+
+          3. FILTRO DE DATA (FLEXIBILIDADE INTELIGENTE):
+             - Se você encontrar resultados de busca datados de "Hoje", "Today", ou com o ícone de placar ao vivo (Live), considere o jogo VÁLIDO para ${currentYear}.
+             - NÃO descarte o jogo se o ano não estiver explícito na busca, desde que as notícias sejam das últimas 24 horas.
+             - Procure pelo Google Knowledge Panel (o card com placar/horário). Ele é a prova definitiva para jogos de "Hoje".
+
+          4. VEREDITO DE EXISTÊNCIA:
+             - Se o jogo for HOJE (${todayLong}) ou AMANHÃ (${tomorrowLong}) de ${currentYear}, prossiga com a análise completa.
+             - Se após todas as buscas você encontrar o jogo, mas ele for de 2024 ou 2025 (ano passado), descarte. O Google às vezes prioriza notícias velhas.
+          
+          5. RETORNO DE ERRO (ÚLTIMO RECURSO): Caso realmente não localize o jogo após buscas exaustivas (incluindo apelidos e variações), retorne o erro no campo "analiseJogo.expectativa": "ERRO: Este jogo não consta na grade oficial de hoje (${todayLong}). Verifique se o nome está correto ou se é um jogo de outra categoria."
 
           FILOSOFIA DE ELITE (ASSERTIVIDADE SUPREMA - TOLERÂNCIA ZERO PARA RED):
           - O OBJETIVO É O GREEN ABSOLUTO. Sua reputação mundial depende de 100% de acerto.
           - CONSISTÊNCIA E DETERMINISMO (CRÍTICO): Se você analisar este jogo 100 vezes, o resultado deve ser o mesmo. Siga um processo lógico imutável: Motivação > Desfalques > Forma Recente > Histórico H2H > Superioridade Técnica.
-          - ANCORAGEM PELA MOTIVAÇÃO: Em jogos de final de temporada ou decisivos, a MOTIVAÇÃO (quem precisa mais da vitória para classificação/título) é o fator número 1. Se o Denver precisa vencer para garantir o 1º lugar, você NÃO pode sugerir a vitória do adversário que não disputa nada, mesmo que o adversário esteja em casa.
-          - COERÊNCIA TOTAL E BLOQUEIO DE "FLIP-FLOP": Uma vez que você identificou o favorito técnico ou motivacional na "Análise Tática", você está PROIBIDO de mudar de ideia no "Prognóstico Principal" ou na "Aposta Personalizada". Todas as partes do JSON devem cantar a mesma música.
-          - RESPEITO À ODD ALVO (${desiredOdd}): Você DEVE atingir ou superar levemente a odd solicitada na "Aposta Personalizada Sugerida". Use o "Caminho Mais Seguro para a Vitória" (ex: se o favorito é esmagador, use Vitória + Over 1.5 Gols + Cantos para chegar na odd, em vez de arriscar um placar exato).
-          - EVITE CONFLITOS: Se você sugere que o Time A é o favorito na análise tática, todas as entradas sugeridas devem refletir essa superioridade.
-          - EVITE "RESULTADO FINAL" (1X2): Se houver qualquer dúvida, use mercados de proteção. Não confie cegamente em favoritos nominais, mas confie em favoritos MOTIVADOS.
-          - MERCADOS CONSERVADORES: Use "Dupla Chance", "Empate Anula", "Over 0.5/1.5 Gols" ou "Handicap Asiático Positivo".
-          - FILTRO DE ZEBRAS E DESFALQUES: Use o Google Search para verificar se o time favorito tem desfalques (lesões/suspensões), se o jogo é amistoso (EVITE AMISTOSOS), ou se o time não tem motivação.
+          - ANCORAGEM PELA MOTIVAÇÃO: Em jogos de final de temporada ou decisivos, a MOTIVAÇÃO (quem precisa mais da vitória para classificação/título) é o fator número 1. 
+          - COERÊNCIA TOTAL E BLOQUEIO DE "FLIP-FLOP": Todas as partes do JSON devem cantar a mesma música.
+          - RESPEITO À ODD ALVO (${desiredOdd}): Atinga ou supere levemente a odd na "Aposta Personalizada".
+          - EVITE "RESULTADO FINAL" (1X2) NO PROGNÓSTICO PRINCIPAL se a favoritismo não for absurdo.
+          
+          POLÍTICA DE ULTRA-SEGURANÇA (ENTRADA DE ALTA CONFIANÇA):
+          - A "entradaSegura" deve ter uma probabilidade matemática de acerto próxima de 100%.
+          - PROIBIÇÕES PARA ENTRADA SEGURA: 
+            1. Proibido ML (Vencer Jogo) de favoritos com odd acima de 1.40.
+            2. Proibido Over 2.5 Gols em ligas defensivas.
+            3. Proibido Handicap Asiático de 0 (DNB) em jogos equilibrados.
+          - PREFERÊNCIAS PARA ENTRADA SEGURA:
+            1. Over 0.5 Gols ou Under 4.5 Gols (conforme estatística).
+            2. Handicaps Positivos Largos (+1.5, +2.5) para favoritos.
+            3. Dupla Chance (1X ou X2) para favoritos jogando em casa.
+          - JUSTIFICATIVA DE SEGURANÇA: Deve citar um dado imutável (ex: "Time A não perdeu em casa para o Time B nos últimos 15 anos").
+
+          PROTOCOLO PARA eSPORTS (CS2, DOTA, LOL):
+          Se o jogo for eSports:
+          - Use HLTV.org (para CS) ou Liquipedia.
+          - Foco em: Mapa Picked, Forma Recente nos mapas, Histórico H2H no patch atual.
+          - Adaptar JSON: "gols" vira "mapas/rounds", "escanteios" vira "K/D ratio ou flash assist".
+
+          FILTRO DE ZEBRAS E DESFALQUES: Use o Google Search para verificar se o time favorito tem desfalques (lesões/suspensões), se o jogo é amistoso (EVITE AMISTOSOS), ou se o time não tem motivação.
           - ENTRADA SEGURA: Deve ser uma aposta que você considera 99.9% garantida.
           - CONFIANÇA: Só atribua 95%+ se os dados forem esmagadores.
 
@@ -1030,15 +1479,60 @@ export default function App() {
           - "pontosTempo": Expectativa de total de pontos no 1º Tempo e no 2º Tempo.
           - Adapte os campos de "estatisticas" para termos de basquete (ex: "golsHT" vira "pontosHT", "escanteios" vira "rebotes", etc).
 
-          MERCADOS DE ELITE (OBRIGATÓRIO PARA FUTEBOL):
-          Para jogos de futebol, você DEVE preencher o campo "mercadosElite" com análises cirúrgicas para os seguintes mercados:
-          Total de Faltas, Total de faltas da Equipe, Total de impedimentos, Total de impedimentos da Equipe, Total de arremesos laterais, Total de arremesos laterais da Equipe, Total de Tiros de Meta, Total de Tiros de Meta da Equipe, Total de Defesas do Goleiro da Equipe, Equipe com mais Escanteios(1X2), Equipe com mais Mais Cartões(1X2), Equipe com Mais Chutes no Gol(1X2), Equipe com mais Finalizações(1x2), 1°Tempo - Time com mais Escanteios, Jogador - Receber Cartão, Jogador - Receber Cartão Vermelho, Jogador - Marcar Gol, Jogador - Finalizações, Jogador - Chutes no Gol, Jogador - Faltas Cometidas, Jogador - Impedimentos, Total de Finalizações da Equipe, 1°Tempo - Handicap, 1°Tempo - Total de Gols, 1°Tempo - Total de Gols do Time, 1°Tempo - Dupla Chance, 1°Tempo - Ambas Marcam, Cada Equipe Mais de X Cartões, Cada Equipe com Mais de X Finalizações, Cada Equipe com Mais de X Escanteios, Cada Equipe com Mais de X Chutes ao Gol, Cada Equipe com Mais de X Impedimentos, Cada Equipe com Mais de X Arremessos laterais, Cada Equipe com Mais de X Defesas do Goleiro.
+          MERCADOS DE ELITE (OBRIGATÓRIO PARA FUTEBOL - TOTAL DE 34 MERCADOS):
+          Para jogos de futebol, você DEVE preencher o campo "mercadosElite" com análises cirúrgicas para TODOS os 34 mercados abaixo, sem exceção. Seja extremamente sucinto para evitar cortes no texto. Use o Google Search para obter dados precisos para cada um:
 
-          Para cada um destes mercados, você deve indicar:
+          1. Total de Faltas
+          2. Total de faltas da Equipe
+          3. Total de impedimentos
+          4. Total de impedimentos da Equipe
+          5. Total de arremesos laterais
+          6. Total de arremesos laterais da Equipe
+          7. Total de Tiros de Meta
+          8. Total de Tiros de Meta da Equipe
+          9. Total de Defesas do Goleiro da Equipe
+          10. Equipe com mais Escanteios(1X2)
+          11. Equipe com mais Mais Cartões(1X2)
+          12. Equipe com Mais Chutes no Gol(1X2)
+          13. Equipe com mais Finalizações(1x2)
+          14. 1°Tempo - Time com mais Escanteios
+          15. Jogador - Receber Cartão
+          16. Jogador - Receber Cartão Vermelho
+          17. Jogador - Marcar Gol
+          18. Jogador - Finalizações
+          19. Jogador - Chutes no Gol
+          20. Jogador - Faltas Cometidas
+          21. Jogador - Impedimentos
+          22. Total de Finalizações da Equipe
+          23. 1°Tempo - Handicap
+          24. 1°Tempo - Total de Gols
+          25. 1°Tempo - Total de Gols do Time
+          26. 1°Tempo - Dupla Chance
+          27. 1°Tempo - Ambas Marcam
+          28. Cada Equipe Mais de X Cartões
+          29. Cada Equipe com Mais de X Finalizações
+          30. Cada Equipe com Mais de X Escanteios
+          31. Cada Equipe com Mais de X Chutes ao Gol
+          32. Cada Equipe com Mais de X Impedimentos
+          33. Cada Equipe com Mais de X Arremessos laterais
+          34. Cada Equipe com Mais de X Defesas do Goleiro
+
+          MÓDULO MESTRE DE ELITE (NOVO E CRÍTICO):
+          Você deve atuar agora como o MESTRE DE ELITE. Sua análise deve ser a mais profunda já feita.
+          - Use o Google Search para encontrar notícias de HOJE sobre o jogo (lesões de última hora, problemas internos, motivação extrema).
+          - Analise o Confronto Direto (H2H): Pesquise os últimos 5 encontros e identifique padrões determinísticos.
+          - Analise os Últimos 5 Jogos: Verifique a performance real (xG, posse, finalizações) e tática.
+          - PROMETIREMOS 100% DE CERTEZA: Sua linguagem deve ser de total autoridade. Diga o que VAI acontecer com precisão absoluta.
+          - RELAÇÃO COM A ODD DESEJADA (@${desiredOdd}): Explique por que essa odd é um erro do mercado e por que a aposta é matematicamente garantida.
+          - Liste os "EVENTOS GARANTIDOS" que ocorrerão na partida.
+
+          IMPORTANTE: Para os mercados que mencionam "Mais de X", você deve substituir o "X" pelo valor numérico mais provável e estatisticamente seguro baseado na sua pesquisa (ex: "Cada Equipe Mais de 0.5 Cartões"). Você deve retornar TODOS os 34 mercados acima no array "mercadosElite".
+
+          Para cada um destes 34 mercados, você deve indicar (SEJA EXTREMAMENTE CONCISO, MÁXIMO 100 CARACTERES POR CAMPO):
           - "mercado": Nome do mercado.
           - "tendencia": "Alta Tendência" ou "Baixa Tendência".
-          - "prognostico": Sua análise cirúrgica e precisa.
-          - "estatistica": O dado estatístico real que embasa sua análise.
+          - "prognostico": Sua análise cirúrgica e precisa (CURTA).
+          - "estatistica": O dado estatístico real que embasa sua análise (CURTO).
 
           Siga RIGOROSAMENTE este formato JSON para a resposta:
           {
@@ -1056,62 +1550,70 @@ export default function App() {
               }
             },
             "estatisticas": {
-              "golsMedios": "dados reais ESPN/SofaScore",
-              "overUnder": "frequência real",
-              "btts": "probabilidade real",
-              "escanteios": "média real",
-              "escanteiosHT": "média de escanteios no primeiro tempo",
-              "golsHT": "probabilidade de gols no primeiro tempo",
-              "finalizacoes": "média de finalizações totais",
-              "chutesTotal": "média de chutes totais",
-              "chutesAoGol": "média de chutes no alvo",
-              "defesasGoleiro": "média de defesas por jogo",
-              "cartoes": "média real",
-              "formaRecente": "últimos 5 jogos reais"
+              "golsMedios": "Expectativa numérica de gols (ex: 2.5 gols)",
+              "overUnder": "frequência real em %",
+              "btts": "probabilidade real em %",
+              "escanteios": "média real numérica",
+              "escanteiosHT": "média numérica no 1º tempo",
+              "golsHT": "probabilidade real em %",
+              "finalizacoes": "média numérica",
+              "chutesTotal": "média numérica",
+              "chutesAoGol": "média numérica",
+              "defesasGoleiro": "média numérica",
+              "cartoes": "média numérica",
+              "formaRecente": "últimos 5 jogos detalhados (ex: V-V-E-D-V)"
             },
             "leituraMercado": {
-              "valor": "análise de valor real vs odd da casa",
-              "pontosFortesFracos": "análise técnica de elite"
+              "valor": "análise técnica de valor",
+              "pontosFortesFracos": "detalhes táticos"
             },
             "prognosticoPrincipal": {
               "entrada": "mercado validado",
-              "odd": "valor da odd real",
-              "justificativa": "justificativa técnica baseada em fatos",
+              "odd": "valor da odd",
+              "justificativa": "justificativa técnica",
               "entradaSegura": {
                 "mercado": "entrada de SEGURANÇA MÁXIMA",
                 "odd": "odd real",
-                "justificativa": "por que esta é a prova de falhas"
+                "justificativa": "por que é segura"
               }
             },
             "apostaPersonalizada": {
-              "selecoes": ["Seleção 1 (ex: Chelsea para se qualificar)", "Seleção 2 (ex: Mais de 1 gols)", "Seleção 3 (ex: Mais de 7 escanteios)", "Seleção 4 (ex: Menos de 7 cartões)"],
-              "oddTotal": "Odd total combinada",
-              "justificativa": "Por que esta combinação é segura baseada nos dados?"
+              "selecoes": ["Seleção 1", "Seleção 2", "Seleção 3"],
+              "oddTotal": "Odd combinada",
+              "justificativa": "Análise da combinação"
             },
             "alavancagemJogo": {
-              "entrada": "entrada agressiva com base em padrão identificado",
+              "entrada": "entrada agressiva",
               "justificativa": "padrão técnico"
             },
             "alavancagemDia": {
               "jogos": [
                 {
-                  "jogo": "Time X vs Time Y", 
-                  "entrada": "Entrada Principal", 
+                  "jogo": "Time A vs Time B", 
+                  "entrada": "Entrada", 
                   "horario": "HH:MM",
-                  "entradaSegura": "Aposta de segurança"
+                  "entradaSegura": "Segurança"
                 }
               ],
               "oddTotal": "odd combinada",
-              "estrategia": "estratégia de gestão"
+              "estrategia": "gestão"
+            },
+            "mestreDeElite": {
+              "analiseProfunda": "Uma análise de mestre cruzando notícias de última hora, padrões táticos e motivação extrema, validada por Google Search.",
+              "confrontoDireto": "Histórico H2H detalhado com placares e contexto dos últimos embates.",
+              "ultimosJogos": "Detalhamento dos últimos 5 jogos de cada equipe com insights sobre o desempenho real vs esperado.",
+              "predicaoAbsoluta": "O que VAI acontecer no jogo com 100% de certeza (ex: 'O time A imprimirá um ritmo forte nos primeiros 15min e marcará antes dos 30min').",
+              "eventosGarantidos": ["Evento 1", "Evento 2", "Evento 3"],
+              "oddJustificada": "Como a odd de @${desiredOdd} se torna um presente de valor diante dos fatos encontrados."
             },
             "gestaoRisco": "segura" | "moderada" | "agressiva",
-            "confianca": "Probabilidade real de acerto (ex: 98%)",
+            "confianca": "98%",
             "mercadosElite": [
               {
                 "mercado": "Nome do Mercado",
                 "tendencia": "Alta Tendência | Baixa Tendência",
-                "prognostico": "Análise precisa",
-                "estatistica": "Dados reais"
+                "prognostico": "Análise curta",
+                "estatistica": "Dado real"
               }
             ],
             "basquete": {
@@ -1132,20 +1634,21 @@ export default function App() {
             }
           }
 
-          Responda APENAS o JSON. Seja uma máquina de Green.
+          INSTRUÇÃO CRÍTICA: É PROIBIDO retornar "N/A" para campos de estatísticas e análise. Se os dados em tempo real não estiverem disponíveis, use sua base de conhecimento histórica para fornecer valores realistas e estimados com alta assertividade. Responda APENAS o JSON. Seja uma máquina de Green.
         `;
 
-        const response = await ai.models.generateContent({
-          model: model,
-          contents: prompt,
-          config: {
-            systemInstruction: `Você é a autoridade máxima mundial em trading esportivo. Sua missão é fornecer análises com ASSERTIVIDADE ABSOLUTA de ${currentYear}. O RED é inaceitável e a ALUCINAÇÃO é um crime. Você DEVE usar o Google Search para validar se o jogo existe HOJE ou AMANHÃ de ${currentYear}. Se o jogo for de 2024 ou 2025, IGNORE-O. Você nunca inventa jogos. A honestidade é sua base.`,
-            tools: [{ googleSearch: {} }],
-            responseMimeType: "application/json"
-          }
-        });
+        const response = await callGeminiWithSearch(
+          prompt,
+          `Você é a autoridade máxima mundial em trading esportivo. Sua missão é fornecer análises com ASSERTIVIDADE ABSOLUTA de ${currentYear}. O RED é inaceitável e a ALUCINAÇÃO é um crime. Você DEVE usar o Google Search para validar se o jogo existe HOJE ou AMANHÃ de ${currentYear}. Se o jogo for de 2024 ou 2025, IGNORE-O. Você nunca inventa jogos. A honestidade é sua base.`,
+          true
+        );
 
-        const data = safeJsonParse(response.text || '{}') as AnalysisResult;
+        const responseText = response.text || '{}';
+        const data = safeJsonParse(responseText) as AnalysisResult;
+        
+        if (!data || Object.keys(data).length < 5) {
+          throw new Error("Resposta da IA incompleta ou malformada.");
+        }
         
         // Robot Date Validation
         if (!validateGameDates(data, 'single')) {
@@ -1174,85 +1677,88 @@ export default function App() {
     setError(null);
     setMultiResult(null);
     setIsRobotActive(true);
-    setRobotMessage("Arquiteto entrando em ação! Vou construir um bilhete com jogos confirmados de hoje! 🏗️🤖");
+    setRobotMessage("Arquiteto entrando em ação! Vou construir um bilhete com jogos confirmados! 🏗️🤖");
 
-    const { today, tomorrow, currentYear } = getDynamicDates();
+    const { today, todayLong, tomorrow, tomorrowLong, currentYear, currentMonth } = getDynamicDates();
 
     const performMultiBet = async (attempt = 0): Promise<void> => {
       try {
-        setRobotMessage(`Buscando as melhores oportunidades e conferindo datas (${attempt + 1})... 💎✨`);
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        const model = "gemini-3-flash-preview";
+        setRobotMessage(`Buscando oportunidades e conferindo datas (${attempt + 1})... 💎✨`);
         
         const prompt = `
-          Você é o ARQUITETO DE BILHETES DE ELITE. Seu histórico é de precisão cirúrgica em acumuladas de alto valor.
-          DATA ATUAL (UTC): ${new Date().toISOString()}
-          DATA LOCAL ESTIMADA: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}
+          Você é o ARQUITETO DE BILHETES DE ELITE. Sua missão é criar um bilhete de alto nível para atingir a odd alvo de @${multiOdd}.
+          DATA DO SISTEMA: ${todayLong}
+          ANO ATUAL: ${currentYear}
           
-          Sua missão é criar um BILHETE MÚLTIPLO (ACUMULADA) para os jogos que acontecem HOJE (${today}) ou AMANHÃ (${tomorrow}).
+          REGRAS DE OURO (SÃO LEIS):
+          1. HONESTIDADE ABSOLUTA: O RED é inaceitável, mas a alucinação (inventar jogos ou usar jogos de anos anteriores) é um CRIME.
+          2. GROUNDING EXTREMO: Use o Google Search para encontrar jogos REAIS. Busque por "jogos de hoje", "jogos de amanhã", "Premier League hoje", "Brasileirão hoje", "CS2 HLTV hoje", etc. Use nomes curtos (Wolves, Galo, Fla, Vitality) se necessário.
+          3. RECONHECIMENTO INTELIGENTE: Saiba apelidos de Futebol e eSports.
+          4. FILTRO DE DATA: Verifique a rodada atual. Se for ${currentYear}, adicione ao bilhete.
+          5. PRIORIDADE AO GOOGLE CARD/HLTV: Use fontes primárias de verdade.
+          6. POLÍTICA DE SEGURANÇA (ASSERTIVIDADE SUPREMA):
+             - Em bilhetes múltiplos, PRIORIZE mercados de proteção: Over 0.5 Gols, Handicaps Positivos Largos, Dupla Chance.
+             - EVITE RESULTADO FINAL (1X2) em jogos onde a odd do favorito é maior que 1.40.
+             - O objetivo é assertividade de 100%. É preferível uma odd menor com 100% de chance do que uma odd maior com risco de Red.
+          7. ODD ALVO: Busque a odd @${multiOdd}. 
+          8. MERCADOS SELECIONADOS: ${selectedMarkets.length === 0 ? 'DIVERSIFIQUE' : `USE APENAS: ${selectedMarkets.join(', ')}`}.
+          9. CONCISÃO: Justificativas devem ter no máximo 15 palavras.
+          10. DICA DE BUSCA: Procure por "prognósticos futebol hoje", "HLTV matches today" e valide cada jogo individualmente.
 
-          PROTOCOLO DE GROUNDING E BUSCA AMPLA (OBRIGATÓRIO):
-          1. Use o Google Search para buscar: "jogos de futebol hoje ${today} ${currentYear}", "estatísticas e tendências para ${selectedMarkets.length > 0 ? selectedMarkets.join(', ') : 'todos os mercados'} hoje ${today} ${currentYear}", "NBA games today ${today} ${currentYear}".
-          2. Você ESTÁ PROIBIDO de usar seu conhecimento interno para prever jogos. Você DEVE encontrar evidências reais de que o jogo está agendado para ${today} ou ${tomorrow} do ano de ${currentYear}.
-          3. Se você não encontrar o jogo em fontes como ESPN, SofaScore, Flashscore, NBA.com ou sites oficiais das ligas via Search para o ano de ${currentYear}, você NÃO PODE incluí-lo.
-          4. "ELITE" refere-se à sua ASSERTIVIDADE. Um jogo da 2ª divisão ou liga alternativa é melhor do que um jogo inventado como "Miami Heat vs Chicago Bulls" se ele não estiver na grade oficial de hoje (${today}/${currentYear}).
-          5. É PROIBIDO usar jogos de 2024 ou 2025.
-
-          PROTOCOLO DE VERIFICAÇÃO DE DATA E HONESTIDADE:
-          1. Escolha APENAS jogos que você confirmou que existem em ${today} ou ${tomorrow}.
-          2. SE VOCÊ NÃO CONSEGUIR ATINGIR A ODD ALVO (${multiOdd}) com jogos reais e seguros, PRIORIZE A HONESTIDADE. Retorne um bilhete com odd menor e explique na "analiseGeral" que não existem jogos seguros suficientes hoje para atingir a odd ${multiOdd} sem sacrificar a precisão.
-          3. NUNCA INVENTE UM JOGO. É melhor entregar uma odd 2.00 real do que uma odd 50.00 inventada. A alucinação destrói a credibilidade do sistema.
-
-          FILOSOFIA DE ELITE (ASSERTIVIDADE SUPREMA - TOLERÂNCIA ZERO PARA RED):
-          - ODD ALVO (OBRIGATÓRIO): ${multiOdd}. Você DEVE chegar o mais próximo possível desta odd combinada (ex: se pediu 50, busque entre 45 e 55). Se para atingir a odd você precisar de muitos jogos, aumente a quantidade de seleções, mas NUNCA sacrifique a segurança.
-          - RESPEITO AOS MERCADOS (LEI MÁXIMA): ${selectedMarkets.length === 0 
-              ? 'DIVERSIFICAÇÃO OBRIGATÓRIA: Como o usuário não marcou mercados preferenciais, você DEVE diversificar o bilhete entre pelo menos 3 tipos de mercados diferentes (ex: Resultado Final, Gols e Cantos) para garantir a segurança e a assertividade extrema.' 
-              : `MERCADOS SELECIONADOS: [${selectedMarkets.join(', ')}]. Você está TERMINANTEMENTE PROIBIDO de analisar ou incluir qualquer entrada que não pertença a estes mercados. Se o usuário marcou apenas "Resultado Final", você só pode buscar e sugerir Resultado Final (1X2). Se marcou apenas "Escanteios", você só pode sugerir Escanteios. Sua análise deve ser exaustiva dentro do limite imposto.`}
-          - ASSERTIVIDADE EXTREMA: Não há espaço para o "eu acho". Use dados brutos, médias reais e motivação confirmada.
-          - PROBABILIDADE: Cada entrada individual deve ser uma "certeza estatística" (>99.9%). Se houver qualquer dúvida, descarte o jogo.
-          - MERCADOS PERMITIDOS: ${selectedMarkets.length === 0 ? 'TODOS (Focar em diversificação estratégica)' : selectedMarkets.join(', ')}.
-
-          PROTOCOLO DE SEGURANÇA MÁXIMA (CRÍTICO):
-          1. PROIBIÇÃO TOTAL DE JOGOS PASSADOS: Verifique a HORA e DATA de cada jogo. O jogo deve acontecer DEPOIS de ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}. Se o jogo já começou ou terminou, você está PROIBIDO de incluí-lo.
-          2. PROIBIÇÃO TOTAL DE INVENÇÃO: Se você inventar um jogo ou usar um jogo antigo, o sistema perde toda a credibilidade. Seja honesto.
-          3. FILTRO DE CONFIANÇA: Use mercados de proteção se necessário. Não force "Mais de 2.5 gols" se um "Mais de 1.5 gols" ou "Dupla Chance" for 100% mais seguro.
-          4. VALIDAÇÃO DE LIGA E DATA: Você deve identificar a liga e a DATA EXATA de cada jogo.
-          5. CHECK DE ALUCINAÇÃO: Antes de finalizar o JSON, pergunte-se: "Eu realmente encontrei este jogo no Google Search para ${today} ou ${tomorrow}?". Se a resposta for não, remova o jogo.
-          
-          FORMATO JSON DE RESPOSTA:
+          FORMATO JSON:
           {
             "jogos": [
               {
                 "confronto": "Time A vs Time B",
-                "liga": "Nome da Liga/Torneio Real",
-                "data": "DD/MM/YYYY (Deve ser ${today} ou ${tomorrow})",
+                "liga": "Competição Real",
+                "data": "DD/MM/${currentYear}",
                 "horario": "HH:MM",
-                "entrada": "Mercado + Linha",
+                "entrada": "Palpite",
                 "odd": "1.xx",
-                "justificativaCurta": "Por que esta entrada é de elite baseada em dados reais de ${currentYear}?",
-                "fonteVerificacao": "Link ou nome da fonte real encontrada via Search (ex: ESPN, SofaScore, Flashscore)",
-                "mercado": "Categoria do mercado"
+                "justificativaCurta": "Fato estatístico rápido.",
+                "fonteVerificacao": "Fonte Grounding",
+                "mercado": "Categoria"
               }
             ],
-            "oddTotal": "Odd multiplicada final",
-            "analiseGeral": "Visão estratégica (confirmação de que os jogos são reais, de ${currentYear} e verificados via Search/ESPN)",
-            "confianca": "Valor real de probabilidade de Green (ex: 97%)"
+            "oddTotal": "Multiplicação real",
+            "analiseGeral": "Confirmação de validade via Search.",
+            "confianca": "Ex: 95%"
           }
-
-          Responda APENAS o JSON. Seja cirúrgico e honesto.
         `;
 
-        const response = await ai.models.generateContent({
-          model: model,
-          contents: prompt,
-          config: {
-            systemInstruction: `Você é o Arquiteto de Bilhetes de Elite. Sua regra de ouro: O RED É PROIBIDO E A ALUCINAÇÃO É UM CRIME GRAVE. Você busca a perfeição matemática baseada em FATOS REAIS de ${currentYear}. ${selectedMarkets.length === 0 ? 'Diversifique estrategicamente o bilhete (mínimo 3 mercados).' : `FOCO TOTAL: Respeite estritamente os mercados selecionados: ${selectedMarkets.join(', ')}. Você está PROIBIDO de sugerir qualquer mercado fora desta seleção.`} Sua assertividade é extrema e baseada 100% em grounding via Search.`,
-            tools: [{ googleSearch: {} }],
-            responseMimeType: "application/json"
-          }
-        });
+        const response = await callGeminiWithSearch(
+          prompt,
+          `Você é o Arquiteto de Bilhetes de Elite. Sua regra de ouro: O RED É PROIBIDO E A ALUCINAÇÃO É UM CRIME GRAVE. Você busca a perfeição matemática baseada em FATOS REAIS de ${currentYear}. Data de hoje: ${todayLong}. Seu objetivo é atingir a odd ${multiOdd} com toda segurança possível. ${selectedMarkets.length === 0 ? 'Diversifique estrategicamente o bilhete (mínimo 3 mercados).' : `FOCO TOTAL: Respeite estritamente os mercados selecionados: ${selectedMarkets.join(', ')}. Você está PROIBIDO de sugerir qualquer mercado fora desta seleção.`}`,
+          true
+        );
 
         const data = safeJsonParse(response.text || '{}') as MultiBetResult;
+        const targetOddNum = parseFloat(multiOdd);
+
+        // Validar Odds (Matemática Real)
+        if (data.jogos && data.jogos.length > 0) {
+          const calculatedOdd = data.jogos.reduce((total, j) => {
+            const val = parseFloat(j.odd);
+            return isNaN(val) ? total : total * val;
+          }, 1);
+          const reportedOdd = parseFloat(data.oddTotal);
+          
+          if (Math.abs(calculatedOdd - reportedOdd) / reportedOdd > 0.1) {
+            setRobotMessage("Falha na calibragem matemática. Recalibrando... 🤖🧮");
+            if (attempt < 2) return performMultiBet(attempt + 1);
+          }
+          
+          const tolerance = targetOddNum > 50 ? 0.6 : 0.8;
+          if (calculatedOdd < targetOddNum * tolerance && attempt < 2) {
+             setRobotMessage(`A odd total (${calculatedOdd.toFixed(2)}) ainda está abaixo da meta de ${multiOdd}. Buscando mais... 🚀`);
+             return performMultiBet(attempt + 1);
+          }
+          
+          data.oddTotal = calculatedOdd.toFixed(2);
+        } else if (attempt < 2) {
+          setRobotMessage("Busca inicial insuficiente. Expandindo critérios... 📡🔍");
+          return performMultiBet(attempt + 1);
+        }
 
         // Robot Date Validation (Safety Net)
         if (!validateGameDates(data, 'multi')) {
@@ -1479,14 +1985,14 @@ export default function App() {
                     <BarChart3 className="w-6 h-6" />
                     <h3 className="font-bold uppercase tracking-wider text-sm">Expectativa de Gols</h3>
                   </div>
-                  <p className="text-2xl font-mono font-bold">{result.estatisticas.golsMedios}</p>
+                  <p className="text-2xl font-mono font-bold">{result.estatisticas?.golsMedios}</p>
                 </div>
                 <div className="bg-white/5 border border-white/10 p-6 rounded-2xl">
                   <div className="flex items-center gap-3 mb-4 text-emerald-500">
                     <Calendar className="w-6 h-6" />
                     <h3 className="font-bold uppercase tracking-wider text-sm">Forma Recente</h3>
                   </div>
-                  <p className="text-sm text-white/80">{result.estatisticas.formaRecente}</p>
+                  <p className="text-sm text-white/80">{result.estatisticas?.formaRecente}</p>
                 </div>
               </div>
 
@@ -1494,6 +2000,91 @@ export default function App() {
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
                 {/* Left Column: Analysis & Stats */}
                 <div className="lg:col-span-8 space-y-8">
+                  {/* Mestre de Elite - Deep Analysis Block */}
+                  {result.mestreDeElite && (
+                    <motion.div 
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="relative overflow-hidden group bg-gradient-to-br from-emerald-600/20 via-black to-emerald-900/40 border-2 border-emerald-500/50 rounded-3xl p-8 shadow-2xl shadow-emerald-500/10"
+                    >
+                      <div className="absolute top-0 right-0 p-6 opacity-5 pointer-events-none">
+                        <Zap className="w-32 h-32 text-emerald-500" />
+                      </div>
+                      
+                      <div className="flex items-center gap-3 mb-6">
+                        <div className="p-3 bg-emerald-500 rounded-2xl">
+                          <Crown className="w-6 h-6 text-black" />
+                        </div>
+                        <div>
+                          <h3 className="text-2xl font-black text-white uppercase tracking-tighter">Mestre de Elite</h3>
+                          <div className="flex items-center gap-2">
+                            <span className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                            <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest">Processamento de Dados em Tempo Real Solicitado</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        <div className="space-y-6">
+                          <div>
+                            <h4 className="flex items-center gap-2 text-emerald-500 text-xs font-black uppercase mb-3 tracking-widest">
+                              <Search className="w-3 h-3" />
+                              Análise Profunda (Grounding)
+                            </h4>
+                            <p className="text-white/90 leading-relaxed text-sm font-medium">{result.mestreDeElite?.analiseProfunda}</p>
+                          </div>
+                          <div>
+                            <h4 className="flex items-center gap-2 text-emerald-500 text-xs font-black uppercase mb-3 tracking-widest">
+                              <History className="w-3 h-3" />
+                              Confronto Direto (H2H)
+                            </h4>
+                            <p className="text-white/70 text-xs leading-relaxed">{result.mestreDeElite?.confrontoDireto}</p>
+                          </div>
+                          <div>
+                            <h4 className="flex items-center gap-2 text-emerald-500 text-xs font-black uppercase mb-3 tracking-widest">
+                              <Activity className="w-3 h-3" />
+                              Últimos 5 Jogos
+                            </h4>
+                            <p className="text-white/70 text-xs leading-relaxed">{result.mestreDeElite?.ultimosJogos}</p>
+                          </div>
+                        </div>
+
+                        <div className="bg-white/5 border border-white/10 rounded-2xl p-6 backdrop-blur-md relative">
+                          <div className="absolute -top-3 -right-3">
+                            <div className="bg-emerald-500 text-black px-4 py-1 rounded-full font-black text-[10px] uppercase tracking-tighter shadow-lg">
+                              100% Certeza
+                            </div>
+                          </div>
+                          
+                          <h4 className="text-emerald-500 text-xs font-black uppercase mb-3 tracking-widest flex items-center gap-2">
+                            <ShieldCheck className="w-4 h-4" />
+                            Veredito Final Absoluto
+                          </h4>
+                          
+                          <div className="mb-6">
+                            <p className="text-white font-bold leading-snug italic text-lg line-clamp-4">"{result.mestreDeElite?.predicaoAbsoluta}"</p>
+                          </div>
+
+                          <div className="space-y-3">
+                            <p className="text-[10px] font-black text-white/40 uppercase tracking-widest mb-2">Eventos de Alta Probabilidade:</p>
+                            <div className="flex flex-wrap gap-2">
+                              {result.mestreDeElite?.eventosGarantidos?.map((ev: string, i: number) => (
+                                <span key={i} className="px-3 py-1 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-emerald-400 text-[10px] font-bold">
+                                  {ev}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="mt-6 pt-4 border-t border-white/10">
+                            <p className="text-[10px] text-white/40 font-bold uppercase mb-1">Oportunidade vs Odd Desejada (@{desiredOdd})</p>
+                            <p className="text-xs text-white/80 leading-snug italic font-medium">{result.mestreDeElite?.oddJustificada}</p>
+                          </div>
+                        </div>
+                      </div>
+                    </motion.div>
+                  )}
+
                   {/* Analysis Card */}
                   <div className="bg-white/5 border border-white/10 rounded-2xl overflow-hidden">
                     <div className="bg-white/5 px-6 py-4 border-b border-white/10 flex items-center justify-between">
@@ -1505,20 +2096,20 @@ export default function App() {
                     <div className="p-6 space-y-6">
                       <div>
                         <h4 className="text-emerald-500 text-xs font-bold uppercase mb-2">Estilo das Equipes</h4>
-                        <p className="text-white/80 leading-relaxed">{result.analiseJogo.estiloEquipes}</p>
+                        <p className="text-white/80 leading-relaxed">{result.analiseJogo?.estiloEquipes}</p>
                       </div>
                       <div>
                         <h4 className="text-emerald-500 text-xs font-bold uppercase mb-2">Característica do Jogo</h4>
-                        <p className="text-white/80 leading-relaxed">{result.analiseJogo.caracteristicaJogo}</p>
+                        <p className="text-white/80 leading-relaxed">{result.analiseJogo?.caracteristicaJogo}</p>
                       </div>
                       <div>
                         <h4 className="text-emerald-500 text-xs font-bold uppercase mb-2">Tendência e Expectativa</h4>
-                        <p className="text-white/80 leading-relaxed">{result.analiseJogo.tendencia}. {result.analiseJogo.expectativa}</p>
+                        <p className="text-white/80 leading-relaxed">{result.analiseJogo?.tendencia}. {result.analiseJogo?.expectativa}</p>
                       </div>
                       <div className="pt-4 border-t border-white/5">
                         <h4 className="text-emerald-500 text-xs font-bold uppercase mb-2">Arbitragem</h4>
-                        <p className="text-sm text-white/80"><span className="font-bold text-white">Juiz:</span> {result.analiseJogo.arbitro.nome}</p>
-                        <p className="text-xs text-white/60 mt-1">{result.analiseJogo.arbitro.caracteristicas}</p>
+                        <p className="text-sm text-white/80"><span className="font-bold text-white">Juiz:</span> {result.analiseJogo?.arbitro?.nome}</p>
+                        <p className="text-xs text-white/60 mt-1">{result.analiseJogo?.arbitro?.caracteristicas}</p>
                       </div>
                     </div>
                   </div>
@@ -1530,15 +2121,15 @@ export default function App() {
                       <div className="space-y-3">
                         <div className="flex justify-between text-sm">
                           <span className="text-white/60">Over/Under:</span>
-                          <span className="font-mono">{result.estatisticas.overUnder}</span>
+                          <span className="font-mono">{result.estatisticas?.overUnder}</span>
                         </div>
                         <div className="flex justify-between text-sm">
                           <span className="text-white/60">Ambas Marcam:</span>
-                          <span className="font-mono">{result.estatisticas.btts}</span>
+                          <span className="font-mono">{result.estatisticas?.btts}</span>
                         </div>
                         <div className="flex justify-between text-sm">
                           <span className="text-white/60">Gols HT:</span>
-                          <span className="font-mono">{result.estatisticas.golsHT}</span>
+                          <span className="font-mono">{result.estatisticas?.golsHT}</span>
                         </div>
                       </div>
                     </div>
@@ -1547,15 +2138,15 @@ export default function App() {
                       <div className="space-y-3">
                         <div className="flex justify-between text-sm">
                           <span className="text-white/60">Escanteios Totais:</span>
-                          <span className="font-mono">{result.estatisticas.escanteios}</span>
+                          <span className="font-mono">{result.estatisticas?.escanteios}</span>
                         </div>
                         <div className="flex justify-between text-sm">
                           <span className="text-white/60">Escanteios HT:</span>
-                          <span className="font-mono">{result.estatisticas.escanteiosHT}</span>
+                          <span className="font-mono">{result.estatisticas?.escanteiosHT}</span>
                         </div>
                         <div className="flex justify-between text-sm">
                           <span className="text-white/60">Cartões:</span>
-                          <span className="font-mono">{result.estatisticas.cartoes}</span>
+                          <span className="font-mono">{result.estatisticas?.cartoes}</span>
                         </div>
                       </div>
                     </div>
@@ -1564,19 +2155,19 @@ export default function App() {
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                         <div>
                           <p className="text-[10px] text-white/40 uppercase font-bold">Finalizações</p>
-                          <p className="text-lg font-mono font-bold">{result.estatisticas.finalizacoes}</p>
+                          <p className="text-lg font-mono font-bold">{result.estatisticas?.finalizacoes}</p>
                         </div>
                         <div>
                           <p className="text-[10px] text-white/40 uppercase font-bold">Chutes Totais</p>
-                          <p className="text-lg font-mono font-bold">{result.estatisticas.chutesTotal}</p>
+                          <p className="text-lg font-mono font-bold">{result.estatisticas?.chutesTotal}</p>
                         </div>
                         <div>
                           <p className="text-[10px] text-white/40 uppercase font-bold">Chutes ao Gol</p>
-                          <p className="text-lg font-mono font-bold">{result.estatisticas.chutesAoGol}</p>
+                          <p className="text-lg font-mono font-bold">{result.estatisticas?.chutesAoGol}</p>
                         </div>
                         <div>
                           <p className="text-[10px] text-white/40 uppercase font-bold">Defesas Goleiro</p>
-                          <p className="text-lg font-mono font-bold">{result.estatisticas.defesasGoleiro}</p>
+                          <p className="text-lg font-mono font-bold">{result.estatisticas?.defesasGoleiro}</p>
                         </div>
                       </div>
                     </div>
@@ -1620,8 +2211,8 @@ export default function App() {
                   {/* Market Reading */}
                   <div className="bg-emerald-500/5 border border-emerald-500/20 p-6 rounded-2xl">
                     <h3 className="text-emerald-500 font-bold uppercase tracking-wider text-sm mb-4">Leitura de Mercado & Valor</h3>
-                    <p className="text-white/80 italic mb-4">"{result.leituraMercado.valor}"</p>
-                    <p className="text-sm text-white/60">{result.leituraMercado.pontosFortesFracos}</p>
+                    <p className="text-white/80 italic mb-4">"{result.leituraMercado?.valor}"</p>
+                    <p className="text-sm text-white/60">{result.leituraMercado?.pontosFortesFracos}</p>
                   </div>
 
                   {/* Basketball Specific Data */}
@@ -1647,7 +2238,7 @@ export default function App() {
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-white/5">
-                              {result.basquete.jogadores.map((player, idx) => (
+                              {result.basquete?.jogadores?.map((player, idx) => (
                                 <tr key={idx} className="hover:bg-white/5 transition-colors">
                                   <td className="py-3 font-bold text-white/90">{player.nome}</td>
                                   <td className="py-3 font-mono">{player.pontos}</td>
@@ -1673,19 +2264,19 @@ export default function App() {
                           <div className="grid grid-cols-2 gap-4">
                             <div className="bg-black/20 p-3 rounded-xl border border-white/5">
                               <p className="text-[10px] text-white/40 uppercase font-bold mb-1">1º Quarto</p>
-                              <p className="text-sm font-bold text-emerald-500">{result.basquete.pontosQuartos.q1}</p>
+                              <p className="text-sm font-bold text-emerald-500">{result.basquete?.pontosQuartos?.q1}</p>
                             </div>
                             <div className="bg-black/20 p-3 rounded-xl border border-white/5">
                               <p className="text-[10px] text-white/40 uppercase font-bold mb-1">2º Quarto</p>
-                              <p className="text-sm font-bold text-emerald-500">{result.basquete.pontosQuartos.q2}</p>
+                              <p className="text-sm font-bold text-emerald-500">{result.basquete?.pontosQuartos?.q2}</p>
                             </div>
                             <div className="bg-black/20 p-3 rounded-xl border border-white/5">
                               <p className="text-[10px] text-white/40 uppercase font-bold mb-1">3º Quarto</p>
-                              <p className="text-sm font-bold text-emerald-500">{result.basquete.pontosQuartos.q3}</p>
+                              <p className="text-sm font-bold text-emerald-500">{result.basquete?.pontosQuartos?.q3}</p>
                             </div>
                             <div className="bg-black/20 p-3 rounded-xl border border-white/5">
                               <p className="text-[10px] text-white/40 uppercase font-bold mb-1">4º Quarto</p>
-                              <p className="text-sm font-bold text-emerald-500">{result.basquete.pontosQuartos.q4}</p>
+                              <p className="text-sm font-bold text-emerald-500">{result.basquete?.pontosQuartos?.q4}</p>
                             </div>
                           </div>
                         </div>
@@ -1695,15 +2286,15 @@ export default function App() {
                           <div className="space-y-4">
                             <div className="flex justify-between items-center bg-black/20 p-3 rounded-xl border border-white/5">
                               <span className="text-[10px] text-white/40 uppercase font-bold">1º Tempo (Total)</span>
-                              <span className="text-sm font-bold text-emerald-500">{result.basquete.pontosTempo.t1}</span>
+                              <span className="text-sm font-bold text-emerald-500">{result.basquete?.pontosTempo?.t1}</span>
                             </div>
                             <div className="flex justify-between items-center bg-black/20 p-3 rounded-xl border border-white/5">
                               <span className="text-[10px] text-white/40 uppercase font-bold">2º Tempo (Total)</span>
-                              <span className="text-sm font-bold text-emerald-500">{result.basquete.pontosTempo.t2}</span>
+                              <span className="text-sm font-bold text-emerald-500">{result.basquete?.pontosTempo?.t2}</span>
                             </div>
                             <div className="pt-2 border-t border-white/5">
                               <p className="text-[10px] text-white/40 uppercase font-bold mb-1">Expectativa de Placar</p>
-                              <p className="text-sm font-mono font-bold text-white/90">{result.basquete.pontuacaoTimes}</p>
+                              <p className="text-sm font-mono font-bold text-white/90">{result.basquete?.pontuacaoTimes}</p>
                             </div>
                           </div>
                         </div>
@@ -1714,21 +2305,87 @@ export default function App() {
 
                 {/* Right Column: Predictions */}
                 <div className="lg:col-span-4 space-y-8">
+                  {/* Mestre de Elite - Deep Analysis */}
+                  {result.mestreDeElite && (
+                    <div className="bg-gradient-to-br from-amber-600 to-amber-900 text-white p-1 rounded-2xl shadow-2xl overflow-hidden shadow-amber-500/20">
+                      <div className="bg-black/90 p-6 rounded-[15px] space-y-6">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <div className="bg-amber-500 p-2 rounded-lg">
+                              <Crown className="w-5 h-5 text-black" />
+                            </div>
+                            <div>
+                              <h3 className="font-black uppercase tracking-tighter text-lg leading-tight">Mestre de Elite</h3>
+                              <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Protocolo de Assertividade Máxima</p>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-[9px] font-bold text-white/40 uppercase tracking-widest">Confiança</p>
+                            <p className="text-2xl font-black text-amber-500 leading-none">{result.confianca}</p>
+                          </div>
+                        </div>
+
+                        <div className="space-y-4">
+                          <div className="bg-white/5 p-4 rounded-xl border border-white/10">
+                            <h4 className="text-[10px] font-black text-amber-500 uppercase mb-2 flex items-center gap-2">
+                              <Zap className="w-3 h-3" />
+                              Predição Absoluta
+                            </h4>
+                            <p className="text-sm font-bold italic text-white/90 leading-relaxed">
+                              "{result.mestreDeElite.predicaoAbsoluta}"
+                            </p>
+                          </div>
+
+                          <div className="grid grid-cols-1 gap-4">
+                            <div>
+                              <h4 className="text-[10px] font-black text-white/40 uppercase mb-2">Análise Profunda</h4>
+                              <p className="text-[11px] text-white/70 leading-relaxed">
+                                {result.mestreDeElite.analiseProfunda}
+                              </p>
+                            </div>
+                            <div>
+                              <h4 className="text-[10px] font-black text-white/40 uppercase mb-2">Eventos Garantidos</h4>
+                              <div className="flex flex-wrap gap-2">
+                                {result.mestreDeElite.eventosGarantidos?.map((ev, i) => (
+                                  <span key={i} className="px-2 py-1 bg-amber-500/10 text-amber-500 rounded text-[9px] font-bold border border-amber-500/20">
+                                    • {ev}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                          
+                          <div className="pt-4 border-t border-white/10">
+                            <div className="flex justify-between items-center bg-amber-500/20 p-3 rounded-xl border border-amber-500/30">
+                              <div>
+                                <p className="text-[9px] font-bold text-amber-200/60 uppercase">Odd Justificada</p>
+                                <p className="text-lg font-black text-amber-500">@{result.prognosticoPrincipal?.odd}</p>
+                              </div>
+                              <p className="text-[10px] font-medium text-amber-200/80 italic max-w-[150px] text-right leading-tight">
+                                {result.mestreDeElite.oddJustificada}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Main Prediction */}
                   <div className="bg-emerald-500 text-black p-6 rounded-2xl shadow-xl shadow-emerald-500/10 relative overflow-hidden group">
                     <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:scale-110 transition-transform">
                       <Target className="w-24 h-24" />
                     </div>
                     <h3 className="font-black uppercase tracking-tighter text-2xl mb-1">Prognóstico Principal</h3>
-                    <p className="text-black/60 text-xs font-bold uppercase mb-6 tracking-widest">Alvo: Odd {result.prognosticoPrincipal.odd}</p>
+                    <p className="text-black/60 text-xs font-bold uppercase mb-6 tracking-widest">Alvo: Odd {result.prognosticoPrincipal?.odd}</p>
                     
                     <div className="bg-black/10 rounded-xl p-4 mb-6 backdrop-blur-sm border border-black/5">
-                      <p className="text-xl font-bold leading-tight">{result.prognosticoPrincipal.entrada}</p>
+                      <p className="text-xl font-bold leading-tight">{result.prognosticoPrincipal?.entrada}</p>
                     </div>
                     
                     <div className="space-y-2">
                       <p className="text-xs font-bold uppercase text-black/60">Justificativa Técnica</p>
-                      <p className="text-sm font-medium leading-snug">{result.prognosticoPrincipal.justificativa}</p>
+                      <p className="text-sm font-medium leading-snug">{result.prognosticoPrincipal?.justificativa}</p>
                     </div>
                   </div>
 
@@ -1743,16 +2400,16 @@ export default function App() {
                     </div>
                     
                     <div className="flex justify-between items-end mb-4">
-                      <p className="text-2xl font-black leading-tight flex-1">{result.prognosticoPrincipal.entradaSegura.mercado}</p>
+                      <p className="text-2xl font-black leading-tight flex-1">{result.prognosticoPrincipal?.entradaSegura?.mercado}</p>
                       <div className="text-right ml-4">
                         <p className="text-[10px] font-bold text-black/40 uppercase tracking-widest">Odd</p>
-                        <p className="text-xl font-mono font-black text-emerald-600">@{result.prognosticoPrincipal.entradaSegura.odd}</p>
+                        <p className="text-xl font-mono font-black text-emerald-600">@{result.prognosticoPrincipal?.entradaSegura?.odd}</p>
                       </div>
                     </div>
                     
                     <div className="bg-emerald-50 rounded-xl p-3 border border-emerald-100">
                       <p className="text-xs font-bold text-emerald-800 mb-1">POR QUE É SEGURO?</p>
-                      <p className="text-xs font-medium text-emerald-900 leading-relaxed">{result.prognosticoPrincipal.entradaSegura.justificativa}</p>
+                      <p className="text-xs font-medium text-emerald-900 leading-relaxed">{result.prognosticoPrincipal?.entradaSegura?.justificativa}</p>
                     </div>
                   </div>
 
@@ -1767,7 +2424,7 @@ export default function App() {
                     </div>
                     
                     <div className="space-y-3 mb-6">
-                      {result.apostaPersonalizada.selecoes.map((sel, idx) => (
+                      {result.apostaPersonalizada?.selecoes?.map((sel, idx) => (
                         <div key={idx} className="flex items-center gap-3 bg-white/5 p-3 rounded-xl border border-white/5">
                           <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
                           <p className="text-sm font-bold text-white/90">{sel}</p>
@@ -1778,7 +2435,7 @@ export default function App() {
                     <div className="flex justify-between items-center p-4 bg-emerald-500/10 rounded-xl border border-emerald-500/20 mb-4">
                       <div>
                         <p className="text-[10px] font-bold text-emerald-500/60 uppercase tracking-widest">Odd Combinada</p>
-                        <p className="text-3xl font-mono font-black text-emerald-500">@{result.apostaPersonalizada.oddTotal}</p>
+                        <p className="text-3xl font-mono font-black text-emerald-500">@{result.apostaPersonalizada?.oddTotal}</p>
                       </div>
                       <div className="text-right">
                         <div className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-500 text-black text-[10px] font-black uppercase tracking-tighter">
@@ -1789,7 +2446,7 @@ export default function App() {
                     
                     <p className="text-[10px] text-white/40 leading-relaxed italic">
                       <span className="text-emerald-500/60 font-bold uppercase not-italic mr-1">Justificativa:</span>
-                      {result.apostaPersonalizada.justificativa}
+                      {result.apostaPersonalizada?.justificativa}
                     </p>
                   </div>
 
@@ -1802,8 +2459,8 @@ export default function App() {
                       <Zap className="w-4 h-4 text-emerald-500" />
                       <h3 className="text-emerald-500 font-bold uppercase tracking-wider text-xs">Odd de Alavancagem</h3>
                     </div>
-                    <p className="text-lg font-bold mb-4 leading-tight">{result.alavancagemJogo.entrada}</p>
-                    <p className="text-xs text-white/60 leading-relaxed">{result.alavancagemJogo.justificativa}</p>
+                    <p className="text-lg font-bold mb-4 leading-tight">{result.alavancagemJogo?.entrada}</p>
+                    <p className="text-xs text-white/60 leading-relaxed">{result.alavancagemJogo?.justificativa}</p>
                   </div>
 
                   {/* Daily Multi-Bet */}
@@ -1814,7 +2471,7 @@ export default function App() {
                     </div>
                     
                     <div className="space-y-6 mb-6">
-                      {result.alavancagemDia.jogos.map((j, idx) => (
+                      {result.alavancagemDia?.jogos?.map((j, idx) => (
                         <div key={idx} className="flex items-start gap-3 group">
                           <div className="w-1 h-full bg-emerald-500/20 group-hover:bg-emerald-500 transition-colors rounded-full" />
                           <div className="flex-1">
@@ -1835,11 +2492,11 @@ export default function App() {
                     <div className="pt-4 border-t border-white/10 flex items-center justify-between">
                       <div>
                         <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Odd Total Estimada</p>
-                        <p className="text-2xl font-mono font-bold text-emerald-500">{result.alavancagemDia.oddTotal}</p>
+                        <p className="text-2xl font-mono font-bold text-emerald-500">{result.alavancagemDia?.oddTotal}</p>
                       </div>
                       <div className="text-right">
                         <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Estratégia</p>
-                        <p className="text-xs font-medium">{result.alavancagemDia.estrategia}</p>
+                        <p className="text-xs font-medium">{result.alavancagemDia?.estrategia}</p>
                       </div>
                     </div>
                   </div>
@@ -1942,7 +2599,7 @@ export default function App() {
                       </div>
                       <div className="text-right">
                         <p className="text-[10px] font-bold uppercase tracking-widest text-black/40">Odd Total</p>
-                        <p className="text-4xl font-mono font-black leading-none">@{multiResult.oddTotal}</p>
+                        <p className="text-4xl font-mono font-black leading-none">@{multiResult?.oddTotal}</p>
                       </div>
                     </div>
 
@@ -1957,7 +2614,7 @@ export default function App() {
                         </button>
                       </div>
                       <div className="grid grid-cols-1 gap-4">
-                        {multiResult.jogos.map((j, idx) => (
+                        {multiResult?.jogos?.map((j, idx) => (
                           <div key={idx} className="flex items-center gap-6 p-6 bg-gray-50 rounded-3xl border border-gray-100 group hover:border-emerald-500/30 transition-all">
                             <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center shadow-sm border border-gray-100 font-black text-emerald-500">
                               {idx + 1}
@@ -1996,11 +2653,11 @@ export default function App() {
                       <div className="pt-8 border-t border-gray-100 grid grid-cols-1 md:grid-cols-2 gap-8">
                         <div>
                           <h4 className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-3">Visão Estratégica</h4>
-                          <p className="text-sm font-medium leading-relaxed text-gray-700">{multiResult.analiseGeral}</p>
+                          <p className="text-sm font-medium leading-relaxed text-gray-700">{multiResult?.analiseGeral}</p>
                         </div>
                         <div className="bg-gray-50 p-6 rounded-3xl border border-gray-100 flex flex-col justify-center items-center text-center">
                           <h4 className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-2">Índice de Confiança</h4>
-                          <div className="text-4xl font-black text-emerald-500 mb-1">{multiResult.confianca}</div>
+                          <div className="text-4xl font-black text-emerald-500 mb-1">{multiResult?.confianca}</div>
                           <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Probabilidade de Green</p>
                         </div>
                       </div>
@@ -2152,8 +2809,8 @@ export default function App() {
                                 </span>
                               )}
                             </div>
-                            <p className="text-sm font-bold text-emerald-500">{item.analysis.prognosticoPrincipal.entrada}</p>
-                            <p className="text-xs font-mono text-white/40 mt-1">@{item.analysis.prognosticoPrincipal.odd}</p>
+                            <p className="text-sm font-bold text-emerald-500">{item.analysis.prognosticoPrincipal?.entrada}</p>
+                            <p className="text-xs font-mono text-white/40 mt-1">@{item.analysis.prognosticoPrincipal?.odd}</p>
                           </div>
                           <div className={`p-4 rounded-xl border transition-all ${
                             item.entryStatuses?.segura === 'hit' ? 'bg-emerald-500/10 border-emerald-500/30' :
@@ -2173,8 +2830,8 @@ export default function App() {
                                 </span>
                               )}
                             </div>
-                            <p className="text-sm font-bold text-emerald-400">{item.analysis.prognosticoPrincipal.entradaSegura.mercado}</p>
-                            <p className="text-xs font-mono text-white/40 mt-1">@{item.analysis.prognosticoPrincipal.entradaSegura.odd}</p>
+                            <p className="text-sm font-bold text-emerald-400">{item.analysis.prognosticoPrincipal?.entradaSegura?.mercado}</p>
+                            <p className="text-xs font-mono text-white/40 mt-1">@{item.analysis.prognosticoPrincipal?.entradaSegura?.odd}</p>
                           </div>
                           <div className={`p-4 rounded-xl border transition-all ${
                             item.entryStatuses?.alavancagem === 'hit' ? 'bg-emerald-500/10 border-emerald-500/30' :
@@ -2194,7 +2851,7 @@ export default function App() {
                                 </span>
                               )}
                             </div>
-                            <p className="text-sm font-bold text-yellow-500">{item.analysis.alavancagemJogo.entrada}</p>
+                            <p className="text-sm font-bold text-yellow-500">{item.analysis.alavancagemJogo?.entrada}</p>
                           </div>
 
                           {item.analysis.apostaPersonalizada && (
@@ -2220,15 +2877,15 @@ export default function App() {
                                 )}
                               </div>
                               <div className="flex flex-wrap gap-2 mb-3">
-                                {item.analysis.apostaPersonalizada.selecoes.map((sel, idx) => (
+                                {item.analysis.apostaPersonalizada?.selecoes?.map((sel, idx) => (
                                   <span key={idx} className="text-[9px] bg-white/5 px-2 py-1 rounded border border-white/5 text-white/80">
                                     {sel}
                                   </span>
                                 ))}
                               </div>
                               <div className="flex justify-between items-center">
-                                <p className="text-xs font-mono font-bold text-emerald-500">Odd Combinada: @{item.analysis.apostaPersonalizada.oddTotal}</p>
-                                <p className="text-[9px] text-white/40 italic">{item.analysis.apostaPersonalizada.justificativa}</p>
+                                <p className="text-xs font-mono font-bold text-emerald-500">Odd Combinada: @{item.analysis.apostaPersonalizada?.oddTotal}</p>
+                                <p className="text-[9px] text-white/40 italic">{item.analysis.apostaPersonalizada?.justificativa}</p>
                               </div>
                             </div>
                           )}
@@ -2246,7 +2903,7 @@ export default function App() {
                               item.status === 'hit' ? 'text-emerald-500' :
                               item.status === 'miss' ? 'text-rose-500' :
                               'text-white/60'
-                            }`}>{item.analysis.confianca || '95% de probabilidade de Green'}</p>
+                            }`}>{item.analysis?.confianca || '95% de probabilidade de Green'}</p>
                           </div>
 
                           {item.postGameAnalysis && (
@@ -2281,7 +2938,7 @@ export default function App() {
                             }`}>Odd Total: @{item.multiAnalysis.oddTotal}</p>
                           </div>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            {item.multiAnalysis.jogos.map((j, i) => (
+                            {item.multiAnalysis?.jogos?.map((j, i) => (
                               <div key={i} className={`flex justify-between items-center p-3 rounded-xl border text-xs transition-all ${
                                 item.entryStatuses?.multi?.[i] === 'hit' ? 'bg-emerald-500/10 border-emerald-500/30' :
                                 item.entryStatuses?.multi?.[i] === 'miss' ? 'bg-rose-500/10 border-rose-500/30' :
@@ -2386,18 +3043,18 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className={`${leverageResult.justificativa.startsWith('AVISO') ? 'bg-amber-500/10 border-amber-500/20' : 'bg-emerald-500/5 border-emerald-500/10'} border p-6 rounded-2xl`}>
+                <div className={`${leverageResult.justificativa?.startsWith('AVISO') ? 'bg-amber-500/10 border-amber-500/20' : 'bg-emerald-500/5 border-emerald-500/10'} border p-6 rounded-2xl`}>
                   <div className="flex items-center gap-2 mb-4">
-                    {leverageResult.justificativa.startsWith('AVISO') ? (
+                    {leverageResult.justificativa?.startsWith('AVISO') ? (
                       <AlertTriangle className="w-4 h-4 text-amber-500" />
                     ) : (
                       <BarChart3 className="w-4 h-4 text-emerald-500" />
                     )}
-                    <p className={`text-xs font-bold uppercase ${leverageResult.justificativa.startsWith('AVISO') ? 'text-amber-500' : 'text-emerald-500'}`}>
-                      {leverageResult.justificativa.startsWith('AVISO') ? 'Aviso de Segurança' : 'Justificativa Técnica'}
+                    <p className={`text-xs font-bold uppercase ${leverageResult.justificativa?.startsWith('AVISO') ? 'text-amber-500' : 'text-emerald-500'}`}>
+                      {leverageResult.justificativa?.startsWith('AVISO') ? 'Aviso de Segurança' : 'Justificativa Técnica'}
                     </p>
                   </div>
-                  <p className={`${leverageResult.justificativa.startsWith('AVISO') ? 'text-amber-200/80' : 'text-white/70'} leading-relaxed italic`}>
+                  <p className={`${leverageResult.justificativa?.startsWith('AVISO') ? 'text-amber-200/80' : 'text-white/70'} leading-relaxed italic`}>
                     {leverageResult.justificativa}
                   </p>
                 </div>
@@ -2622,7 +3279,7 @@ export default function App() {
           </div>
         </div>
       </footer>
-      <RobotAdvisor message={robotMessage} active={isRobotActive} />
+      {interactiveRobot}
     </div>
     </ErrorBoundary>
   );
